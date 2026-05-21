@@ -1,0 +1,26 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: demo-devops
+  labels:
+    app.kubernetes.io/name: demo-devops
+    app.kubernetes.io/component: api
+  annotations:
+    # Works for both ingress-nginx (local) and traefik (k3s default).
+    # Local overlay sets ingressClassName: nginx
+    # Prod  overlay sets ingressClassName: traefik
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  # ingressClassName is supplied by the overlay (local: nginx, prod: traefik).
+  rules:
+    - host: demo-devops.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: demo-devops
+                port:
+                  name: http

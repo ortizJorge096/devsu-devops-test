@@ -1,0 +1,123 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-devops
+  labels:
+    app.kubernetes.io/name: demo-devops
+    app.kubernetes.io/component: api
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # Minimum 2 replicas required by the test for HA.
+  # HPA (hpa.yaml) is allowed to scale this up to maxReplicas.
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Zero-downtime rollouts: never go below desired, only add one
+      # extra surge pod at a time.
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: demo-devops
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: demo-devops
+        app.kubernetes.io/component: api
+      annotations:
+        # Forces a rollout when configmap/secret data changes
+        # (Kustomize hash suffixes would be more elegant; this is a
+        # belt-and-braces fallback for non-Kustomize plain-apply users).
+        prometheus.io/scrape: "false"
+    spec:
+      # Spread replicas across nodes when more than one node exists.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: demo-devops
+              app.kubernetes.io/component: api
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # automountServiceAccountToken left default (true) — required by
+      # some K8s API clients; flip to false if the app never calls the API.
+      containers:
+        - name: api
+          # Image tag is overridden by Kustomize overlays (local / prod).
+          image: ghcr.io/CHANGE_ME/demo-devops-nodejs:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: demo-devops-config
+            - secretRef:
+                name: demo-devops-secret
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "96Mi"
+            limits:
+              cpu: "300m"
+              memory: "256Mi"
+          # Liveness — restarts the container if /health stops responding.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Readiness — removes pod from Service endpoints until /health is OK.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          # Startup probe — gives slow boots (sqlite sync) more time before
+          # liveness kicks in.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 3
+            timeoutSeconds: 2
+            failureThreshold: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # Writable scratch for sqlite + any temp file the app may create.
+            - name: data
+              mountPath: /usr/src/app/data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 100Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 50Mi
+      terminationGracePeriodSeconds: 20

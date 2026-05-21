@@ -1,0 +1,37 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: demo-devops
+
+resources:
+  - ../../base
+
+# Prod overlay = k3s single-node on EC2 (AWS Free Tier).
+# k3s ships with Traefik as the default ingress controller, so we wire
+# the Ingress to it. The public host is set to the Elastic IP DNS name
+# emitted by Terraform output (or set TF_VAR_public_host to a CNAME).
+patches:
+  - target:
+      kind: Ingress
+      name: demo-devops
+    patch: |-
+      - op: add
+        path: /spec/ingressClassName
+        value: traefik
+      - op: replace
+        path: /spec/rules/0/host
+        value: demo-devops.example.com   # rewritten by Terraform / deploy script
+  - target:
+      kind: Deployment
+      name: demo-devops
+    patch: |-
+      # On a single-node k3s the topologySpreadConstraint has no effect,
+      # but we keep it for parity. Resources stay the same: t3.micro has
+      # 1 GiB RAM / 2 vCPU so 2 pods × 256Mi limits is fine.
+      - op: replace
+        path: /spec/replicas
+        value: 2
+
+images:
+  - name: ghcr.io/CHANGE_ME/demo-devops-nodejs
+    newTag: latest

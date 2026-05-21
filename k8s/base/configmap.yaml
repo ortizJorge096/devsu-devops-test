@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-devops-config
+  labels:
+    app.kubernetes.io/name: demo-devops
+    app.kubernetes.io/component: api
+data:
+  # Non-sensitive runtime configuration.
+  # SQLite db file path is inside the pod's writable emptyDir volume.
+  DATABASE_NAME: "/usr/src/app/data/dev.sqlite"
+  PORT: "8000"
+  NODE_ENV: "production"
