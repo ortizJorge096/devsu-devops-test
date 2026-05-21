@@ -1,0 +1,43 @@
+# Source control / IDE
+.git
+.gitignore
+.gitattributes
+.github
+.idea
+.vscode
+
+# Dependencies — installed fresh inside the image
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Tests & coverage reports
+coverage
+.nyc_output
+**/__tests__
+**/*.test.js
+jest.config.*
+
+# Local-only files
+.env
+.env.local
+.env.*.local
+*.sqlite
+dev.sqlite
+
+# OS artefacts
+.DS_Store
+Thumbs.db
+
+# Docs / build artefacts
+README.md
+LICENSE
+docs
+dist
+build
+*.tar
+*.tgz
+
+# Editor swap files
+*.swp
