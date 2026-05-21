@@ -1,0 +1,58 @@
+# =========================
+# NodeJS
+# =========================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+coverage/
+.nyc_output
+
+dist/
+build/
+
+.env
+.env.*
+
+*.log
+
+# =========================
+# Terraform
+# =========================
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+terraform.tfvars
+*.tfvars
+
+# =========================
+# Kubernetes
+# =========================
+kubeconfig
+*.kubeconfig
+
+# =========================
+# IDEs
+# =========================
+.vscode/
+.idea/
+
+# =========================
+# OS
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Misc
+# =========================
+tmp/
+temp/
+.cache/
