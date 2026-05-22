@@ -312,7 +312,7 @@ jobs:
             git clone --depth 5 https://github.com/${GH_OWNER}/${GH_REPO}.git /opt/devsu/repo
           fi
           cd /opt/devsu/repo
-          git fetch origin "${BRANCH}" && git reset --hard "origin/${BRANCH}"
+          git fetch origin "${BRANCH}" && git reset --hard FETCH_HEAD
           cd "k8s/overlays/${OVERLAY}"
           /usr/local/bin/kustomize edit set image "devsu-devops-nodejs=${IMG}"
           cd /opt/devsu/repo
