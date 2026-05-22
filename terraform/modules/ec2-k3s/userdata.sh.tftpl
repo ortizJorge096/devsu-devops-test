@@ -12,7 +12,7 @@ set -euxo pipefail
 exec > /var/log/userdata.log 2>&1
 
 dnf -y update
-dnf -y install curl tar git jq awscli
+dnf -y install --allowerasing curl tar git jq awscli
 
 # ─── amazon-ecr-credential-helper ─────────────────────────────────────────
 dnf -y install amazon-ecr-credential-helper || {
