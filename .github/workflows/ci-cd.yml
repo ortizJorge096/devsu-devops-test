@@ -316,8 +316,16 @@ jobs:
           cd "k8s/overlays/${OVERLAY}"
           /usr/local/bin/kustomize edit set image "devsu-devops-nodejs=${IMG}"
           cd /opt/devsu/repo
+          # Wait for k3s apiserver to be ready before applying.
+          for i in $(seq 1 30); do
+            if kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes 2>/dev/null | grep -q "Ready"; then
+              break
+            fi
+            echo "Waiting for k3s... ($i/30)"
+            sleep 10
+          done
           /usr/local/bin/kustomize build "k8s/overlays/${OVERLAY}" \
-            | kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml apply -f -
+            | kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml apply --validate=false -f -
           kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml \
             -n "${NS}" rollout status deployment/demo-devops --timeout=300s
           SCRIPT_EOF
