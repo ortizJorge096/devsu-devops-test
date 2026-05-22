@@ -316,12 +316,13 @@ jobs:
           cd "k8s/overlays/${OVERLAY}"
           /usr/local/bin/kustomize edit set image "devsu-devops-nodejs=${IMG}"
           cd /opt/devsu/repo
-          # Wait for k3s apiserver to be ready before applying.
-          for i in $(seq 1 30); do
-            if kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes 2>/dev/null | grep -q "Ready"; then
+          # Wait for k3s to be installed and apiserver ready (up to 10 min).
+          for i in $(seq 1 60); do
+            if [ -f /usr/local/bin/kubectl ] &&                kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes 2>/dev/null | grep -q "Ready"; then
+              echo "k3s ready after $((i*10))s"
               break
             fi
-            echo "Waiting for k3s... ($i/30)"
+            [ $i -eq 60 ] && echo "ERROR: k3s not ready after 10 min" && exit 1
             sleep 10
           done
           /usr/local/bin/kustomize build "k8s/overlays/${OVERLAY}" \
@@ -332,7 +333,7 @@ jobs:
           )
 
           # jq --arg handles any content (newlines, quotes, backslashes) safely.
-          PARAMS=$(jq -n --arg script "$SCRIPT" '{"commands": [$script]}')
+          PARAMS=$(jq -n --arg script "$SCRIPT" '{"commands": [$script], "executionTimeout": ["900"]}')
 
           CMD_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
