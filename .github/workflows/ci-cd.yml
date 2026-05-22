@@ -183,7 +183,7 @@ jobs:
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
       - name: Trivy scan
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@0.28.0
         with:
           image-ref: ${{ needs.build-push.outputs.sha_tag }}
           format: 'sarif'
