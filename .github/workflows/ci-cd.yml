@@ -2,11 +2,9 @@ name: CI/CD
 
 on:
   push:
-    branches: [develop]
-
-  #   branches: [main, develop]
-  # pull_request:
-  #   branches: [main, develop]
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
   workflow_dispatch: {}
 
 # Minimal default permissions; each job widens what it needs.
@@ -292,59 +290,63 @@ jobs:
             echo "namespace=demo-devops-dev" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Render command body
-        id: cmd
-        run: |
-          IMG='${{ needs.build-push.outputs.sha_tag }}'
-          OVERLAY='${{ steps.env.outputs.overlay }}'
-          NS='${{ steps.env.outputs.namespace }}'
-          {
-            echo 'commands<<COMMANDS_EOF'
-            cat <<COMMANDS
-          set -euxo pipefail
-          cd /opt/devsu/repo
-          git fetch origin && git reset --hard origin/${{ github.ref_name }}
-          cd k8s/overlays/${OVERLAY}
-          /usr/local/bin/kustomize edit set image devsu-devops-nodejs=${IMG}
-          cd /opt/devsu/repo
-          /usr/local/bin/kustomize build k8s/overlays/${OVERLAY} \
-            | kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml apply -f -
-          kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml \
-            -n ${NS} rollout status deployment/demo-devops --timeout=300s
-          COMMANDS
-            echo 'COMMANDS_EOF'
-          } >> "$GITHUB_OUTPUT"
-
       - name: Send command to EC2 via SSM
         id: ssm
+        # Use env: to inject GH expressions as shell vars — avoids quoting issues
+        # when the deploy script contains backslashes, pipes, or newlines.
+        env:
+          IMG:         ${{ needs.build-push.outputs.sha_tag }}
+          OVERLAY:     ${{ steps.env.outputs.overlay }}
+          NS:          ${{ steps.env.outputs.namespace }}
+          BRANCH:      ${{ github.ref_name }}
+          INSTANCE_ID: ${{ steps.ec2.outputs.instance_id }}
         run: |
+          # Build the deploy script — values come from env vars, not inline GH expressions.
+          SCRIPT=$(cat <<SCRIPT_EOF
+          set -euxo pipefail
+          cd /opt/devsu/repo
+          git fetch origin && git reset --hard "origin/${BRANCH}"
+          cd "k8s/overlays/${OVERLAY}"
+          /usr/local/bin/kustomize edit set image "devsu-devops-nodejs=${IMG}"
+          cd /opt/devsu/repo
+          /usr/local/bin/kustomize build "k8s/overlays/${OVERLAY}" \
+            | kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml apply -f -
+          kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml \
+            -n "${NS}" rollout status deployment/demo-devops --timeout=300s
+          SCRIPT_EOF
+          )
+
+          # jq --arg handles any content (newlines, quotes, backslashes) safely.
+          PARAMS=$(jq -n --arg script "$SCRIPT" '{"commands": [$script]}')
+
           CMD_ID=$(aws ssm send-command \
-            --instance-ids "${{ steps.ec2.outputs.instance_id }}" \
+            --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
-            --comment "Deploy ${{ needs.build-push.outputs.sha_tag }}" \            
-            --parameters "commands=$(echo '${{ steps.cmd.outputs.commands }}' | jq -Rs .)" \
+            --comment "Deploy ${IMG##*/}" \
+            --parameters "$PARAMS" \
             --output text --query 'Command.CommandId')
           echo "command_id=$CMD_ID" >> "$GITHUB_OUTPUT"
           echo "SSM CommandId: $CMD_ID"
 
       - name: Wait for SSM command to finish
+        env:
+          INSTANCE_ID: ${{ steps.ec2.outputs.instance_id }}
         run: |
-          CMD_ID='${{ steps.ssm.outputs.command_id }}'
-          INSTANCE='${{ steps.ec2.outputs.instance_id }}'
+          CMD_ID="${{ steps.ssm.outputs.command_id }}"
           for i in $(seq 1 60); do
             STATUS=$(aws ssm get-command-invocation \
-              --command-id "$CMD_ID" --instance-id "$INSTANCE" \
+              --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
               --query 'Status' --output text 2>/dev/null || echo "Pending")
             echo "[$i/60] Status: $STATUS"
             case "$STATUS" in
               Success)
                 echo "::notice::Deploy succeeded"
-                aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE" \
+                aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
                   --query 'StandardOutputContent' --output text | tail -20
                 exit 0 ;;
               Failed|Cancelled|TimedOut)
                 echo "::error::Deploy ended with status $STATUS"
-                aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE"
+                aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID"
                 exit 1 ;;
             esac
             sleep 10
