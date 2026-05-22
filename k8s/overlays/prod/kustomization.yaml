@@ -33,5 +33,10 @@ patches:
         value: 2
 
 images:
-  - name: ghcr.io/CHANGE_ME/demo-devops-nodejs
+  # The CI pipeline replaces this entry via `kustomize edit set image
+  # devsu-devops-nodejs=<account>.dkr.ecr.<region>.amazonaws.com/devsu-devops-nodejs:<sha-tag>`
+  # before applying. The defaults below let `kubectl apply -k` work standalone
+  # if you replace them by hand.
+  - name: devsu-devops-nodejs
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/devsu-devops-nodejs
     newTag: latest

@@ -33,7 +33,7 @@ patches:
         value: Never
 
 images:
-  - name: ghcr.io/CHANGE_ME/demo-devops-nodejs
+  - name: devsu-devops-nodejs
     # For local development, the image is built locally and tagged "dev".
     # Run:  eval $(minikube docker-env) && docker build -t demo-devops-nodejs:dev ./app
     newName: demo-devops-nodejs

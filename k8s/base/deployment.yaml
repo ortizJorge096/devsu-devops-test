@@ -53,8 +53,10 @@ spec:
       # some K8s API clients; flip to false if the app never calls the API.
       containers:
         - name: api
-          # Image tag is overridden by Kustomize overlays (local / prod).
-          image: ghcr.io/CHANGE_ME/demo-devops-nodejs:latest
+          # Opaque "match key" for Kustomize. The overlays (local / prod) and the
+          # CI pipeline (via `kustomize edit set image`) rewrite this to the real
+          # registry URL — Amazon ECR in prod, local dev tag in local.
+          image: devsu-devops-nodejs:placeholder
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

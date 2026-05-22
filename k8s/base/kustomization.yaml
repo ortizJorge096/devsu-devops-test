@@ -19,5 +19,5 @@ resources:
   - networkpolicy.yaml
 
 images:
-  - name: ghcr.io/CHANGE_ME/demo-devops-nodejs
+  - name: devsu-devops-nodejs
     newTag: latest
