@@ -1,0 +1,25 @@
+region       = "us-east-1"
+name_prefix  = "devsu-devops"
+
+# GitHub identity — used both for OIDC trust policy and for the userdata
+# `git clone` that fetches manifests from the prod overlay.
+github_owner = "ortizJorge096"
+github_repo  = "devsu-devops-test"
+
+# Branches allowed to assume the AWS role via OIDC.
+allowed_branches = ["main"]
+
+# Image the EC2/k3s node should deploy. Leave blank to default to
+# "<ecr_repo>:latest" (the CI pipeline keeps that tag fresh). Pin to a
+# specific SHA tag for reproducible production rollouts:
+#   "123456789012.dkr.ecr.us-east-1.amazonaws.com/devsu-devops-nodejs:sha-abc1234"
+image_ref = ""
+
+# Set to false to provision ONLY ecr + github-oidc + network (no EC2).
+# Useful for testing the CI/OIDC flow before standing up the cluster.
+enable_ec2_k3s = true
+
+# Email that gets CloudWatch alarm notifications. The first time, AWS sends
+# a "Confirm subscription" email — you must click the link. Leave blank to
+# skip (alarms still fire, but nobody is notified).
+alarm_email = ""

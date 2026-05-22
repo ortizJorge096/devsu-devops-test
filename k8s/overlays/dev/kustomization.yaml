@@ -1,0 +1,58 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Dev environment — runs in a separate namespace on the same k3s node.
+# Deployed automatically from the `develop` branch via the CI/CD pipeline.
+namespace: demo-devops-dev
+
+resources:
+  - ../../base
+
+patches:
+  # Rename the Namespace object so it matches the namespace field above.
+  # (Kustomize sets namespace on all resources but skips the Namespace kind itself.)
+  - target:
+      kind: Namespace
+      name: demo-devops
+    patch: |-
+      - op: replace
+        path: /metadata/name
+        value: demo-devops-dev
+
+  # 2 replicas — minimum required by the test brief.
+  - target:
+      kind: Deployment
+      name: demo-devops
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
+
+  # Wire to Traefik (k3s default ingress controller, same as prod).
+  # Host is replaced by the deploy script using the Elastic IP DNS name.
+  - target:
+      kind: Ingress
+      name: demo-devops
+    patch: |-
+      - op: add
+        path: /spec/ingressClassName
+        value: traefik
+      - op: replace
+        path: /spec/rules/0/host
+        value: demo-devops-dev.example.com
+
+  # With 2 replicas, keep minAvailable: 1 so rolling updates stay safe.
+  - target:
+      kind: PodDisruptionBudget
+      name: demo-devops
+    patch: |-
+      - op: replace
+        path: /spec/minAvailable
+        value: 1
+
+images:
+  # The CI pipeline replaces this via `kustomize edit set image
+  # devsu-devops-nodejs=<account>.dkr.ecr.<region>.amazonaws.com/devsu-devops-nodejs:<sha-tag>`
+  - name: devsu-devops-nodejs
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/devsu-devops-nodejs
+    newTag: latest

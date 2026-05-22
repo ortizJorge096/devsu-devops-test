@@ -1,0 +1,135 @@
+#!/bin/bash
+# k3s + ECR + CloudWatch Agent bootstrap.
+# Runs on first boot of an Amazon Linux 2023 t3.micro.
+#
+# What it does:
+#   1) Install OS deps + amazon-ecr-credential-helper.
+#   2) Install k3s (containerd-based, certified Kubernetes).
+#   3) Configure containerd to pull from ECR via the EC2 instance profile.
+#   4) (Optional) Install CloudWatch Agent for memory/disk metrics.
+#   5) Clone the GitHub repo and apply the prod overlay.
+set -euxo pipefail
+exec > /var/log/userdata.log 2>&1
+
+dnf -y update
+dnf -y install curl tar git jq awscli
+
+# ─── amazon-ecr-credential-helper ─────────────────────────────────────────
+dnf -y install amazon-ecr-credential-helper || {
+  curl -sSL -o /usr/local/bin/docker-credential-ecr-login \
+    https://amazon-ecr-credential-helper-releases.s3.us-east-2.amazonaws.com/0.7.1/linux-amd64/docker-credential-ecr-login
+  chmod 0755 /usr/local/bin/docker-credential-ecr-login
+}
+
+# ─── CloudWatch Agent (memory/disk metrics) ───────────────────────────────
+%{ if enable_cloudwatch_agent ~}
+dnf -y install amazon-cloudwatch-agent
+
+mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<CWAEOF
+{
+  "agent": {
+    "metrics_collection_interval": 60,
+    "run_as_user": "root"
+  },
+  "metrics": {
+    "namespace": "DevsuDevops/EC2",
+    "append_dimensions": {
+      "InstanceId": "$${aws:InstanceId}"
+    },
+    "metrics_collected": {
+      "mem": {
+        "measurement": ["mem_used_percent"],
+        "metrics_collection_interval": 60
+      },
+      "disk": {
+        "measurement": ["used_percent"],
+        "metrics_collection_interval": 60,
+        "resources": ["/"]
+      }
+    }
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          { "file_path": "/var/log/userdata.log", "log_group_name": "/devsu-devops/userdata", "log_stream_name": "{instance_id}" }
+        ]
+      }
+    }
+  }
+}
+CWAEOF
+
+systemctl enable --now amazon-cloudwatch-agent
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config -m ec2 -s \
+  -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+%{ endif ~}
+
+# ─── k3s (containerd default) ─────────────────────────────────────────────
+curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--write-kubeconfig-mode 644" sh -
+
+for i in {1..60}; do
+  if kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes | grep -q ' Ready '; then
+    break
+  fi
+  sleep 5
+done
+
+# ─── ECR registry config for containerd ───────────────────────────────────
+ECR_HOST="$(echo "${image_ref}" | awk -F/ '{print $1}')"
+mkdir -p /etc/rancher/k3s
+cat > /etc/rancher/k3s/registries.yaml <<REGEOF
+mirrors:
+  "$${ECR_HOST}":
+    endpoint:
+      - "https://$${ECR_HOST}"
+configs:
+  "$${ECR_HOST}":
+    auth: {}
+REGEOF
+
+ln -sf /usr/local/bin/docker-credential-ecr-login /usr/bin/docker-credential-ecr-login || true
+
+mkdir -p /root/.docker
+cat > /root/.docker/config.json <<DOCKERCFG
+{
+  "credHelpers": {
+    "$${ECR_HOST}": "ecr-login"
+  }
+}
+DOCKERCFG
+
+systemctl restart k3s
+
+for i in {1..60}; do
+  if kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes | grep -q ' Ready '; then
+    break
+  fi
+  sleep 5
+done
+
+# ─── kustomize ─────────────────────────────────────────────────────────────
+KUSTOMIZE_VERSION=v5.4.3
+curl -sSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/$${KUSTOMIZE_VERSION}/kustomize_$${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
+  | tar -xz -C /usr/local/bin
+
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
+# ─── Deploy the app from the repo's prod overlay ──────────────────────────
+mkdir -p /opt/devsu
+cd /opt/devsu
+git clone --depth 1 https://github.com/${github_owner}/${github_repo}.git repo
+cd repo
+
+sed -i "s|demo-devops.example.com|${public_host}|g" k8s/overlays/prod/kustomization.yaml || true
+
+cd k8s/overlays/prod
+kustomize edit set image devsu-devops-nodejs=${image_ref}
+cd /opt/devsu/repo
+
+kustomize build k8s/overlays/prod | kubectl --kubeconfig $${KUBECONFIG} apply -f -
+
+kubectl --kubeconfig $${KUBECONFIG} -n demo-devops rollout status deployment/demo-devops --timeout=300s || true
+kubectl --kubeconfig $${KUBECONFIG} -n demo-devops get pods,svc,ingress
