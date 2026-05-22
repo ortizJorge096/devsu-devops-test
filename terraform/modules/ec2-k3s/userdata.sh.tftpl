@@ -26,7 +26,7 @@ dnf -y install amazon-ecr-credential-helper || {
 dnf -y install amazon-cloudwatch-agent
 
 mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
-cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<CWAEOF
+cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'CWAEOF'
 {
   "agent": {
     "metrics_collection_interval": 60,

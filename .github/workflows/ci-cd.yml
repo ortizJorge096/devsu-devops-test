@@ -300,12 +300,19 @@ jobs:
           NS:          ${{ steps.env.outputs.namespace }}
           BRANCH:      ${{ github.ref_name }}
           INSTANCE_ID: ${{ steps.ec2.outputs.instance_id }}
+          GH_OWNER:    ${{ github.repository_owner }}
+          GH_REPO:     ${{ github.event.repository.name }}
         run: |
           # Build the deploy script — values come from env vars, not inline GH expressions.
           SCRIPT=$(cat <<SCRIPT_EOF
           set -euxo pipefail
+          # Clone repo if userdata didn't finish or failed.
+          if [ ! -d /opt/devsu/repo ]; then
+            mkdir -p /opt/devsu
+            git clone --depth 5 https://github.com/${GH_OWNER}/${GH_REPO}.git /opt/devsu/repo
+          fi
           cd /opt/devsu/repo
-          git fetch origin && git reset --hard "origin/${BRANCH}"
+          git fetch origin "${BRANCH}" && git reset --hard "origin/${BRANCH}"
           cd "k8s/overlays/${OVERLAY}"
           /usr/local/bin/kustomize edit set image "devsu-devops-nodejs=${IMG}"
           cd /opt/devsu/repo
