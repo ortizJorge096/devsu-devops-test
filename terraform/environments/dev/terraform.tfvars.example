@@ -7,7 +7,7 @@ github_owner = "ortizJorge096"
 github_repo  = "devsu-devops-test"
 
 # Branches allowed to assume the AWS role via OIDC.
-allowed_branches = ["main"]
+allowed_branches = ["main", "develop"]
 
 # Image the EC2/k3s node should deploy. Leave blank to default to
 # "<ecr_repo>:latest" (the CI pipeline keeps that tag fresh). Pin to a
@@ -23,3 +23,6 @@ enable_ec2_k3s = true
 # a "Confirm subscription" email — you must click the link. Leave blank to
 # skip (alarms still fire, but nobody is notified).
 alarm_email = ""
+
+# GitHub Environments that the deploy job runs under (sub claim changes when environment: is set).
+allowed_environments = ["dev", "production"]

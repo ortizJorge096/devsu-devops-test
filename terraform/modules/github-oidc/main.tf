@@ -52,10 +52,18 @@ data "aws_iam_policy_document" "trust" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values = [
-        for b in var.allowed_branches :
-        "repo:${var.github_owner}/${var.github_repo}:ref:refs/heads/${b}"
-      ]
+      values = concat(
+        # Branch-based claims (build-push, image-scan jobs)
+        [
+          for b in var.allowed_branches :
+          "repo:${var.github_owner}/${var.github_repo}:ref:refs/heads/${b}"
+        ],
+        # Environment-based claims (deploy job — sub changes when job has environment: set)
+        [
+          for e in var.allowed_environments :
+          "repo:${var.github_owner}/${var.github_repo}:environment:${e}"
+        ]
+      )
     }
   }
 }

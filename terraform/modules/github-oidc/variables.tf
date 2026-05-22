@@ -30,3 +30,9 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "allowed_environments" {
+  description = "GitHub Environments allowed to assume the role via OIDC (e.g. [\"dev\", \"production\"])."
+  type        = list(string)
+  default     = []
+}

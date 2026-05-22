@@ -33,8 +33,9 @@ module "github_oidc" {
   github_owner       = var.github_owner
   github_repo        = var.github_repo
   allowed_branches   = var.allowed_branches
-  ecr_repository_arn = module.ecr.repository_arn
-  role_name          = "${var.name_prefix}-gha-deploy"
+  ecr_repository_arn   = module.ecr.repository_arn
+  role_name            = "${var.name_prefix}-gha-deploy"
+  allowed_environments = var.allowed_environments
   tags = { Component = "ci" }
 }
 
@@ -58,7 +59,12 @@ module "k3s" {
   public_host             = ""
   cloudwatch_agent_config = true
 
-  tags = { Component = "runtime" }
+  # Tags used by the CI pipeline to locate the instance via SSM (filters by
+  # Component=runtime AND Project=<repo-name>).
+  tags = {
+    Component = "runtime"
+    Project   = var.github_repo
+  }
 }
 
 module "monitoring" {

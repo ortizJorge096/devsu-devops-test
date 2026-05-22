@@ -46,3 +46,9 @@ variable "alarm_email" {
   type        = string
   default     = ""
 }
+
+variable "allowed_environments" {
+  description = "GitHub Environments allowed to assume the role via OIDC (deploy job)."
+  type        = list(string)
+  default     = ["dev", "production"]
+}
