@@ -25,7 +25,7 @@ patches:
         value: traefik
       - op: replace
         path: /spec/rules/0/host
-        value: demo-devops.example.com   # rewritten by user-data / deploy script
+        value: demo-devops.18-235-142-69.nip.io   # rewritten by user-data / deploy script
 
   - path: tls-patch.yaml
     target:
