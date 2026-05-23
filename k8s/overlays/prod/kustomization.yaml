@@ -8,8 +8,13 @@ resources:
 
 # Prod overlay = k3s single-node on EC2 (AWS Free Tier).
 # k3s ships with Traefik as the default ingress controller, so we wire
-# the Ingress to it. The public host is set to the Elastic IP DNS name
-# emitted by Terraform output (or set TF_VAR_public_host to a CNAME).
+# the Ingress to it. The public host is `demo-devops.example.com` here
+# as a placeholder — both the user-data first-boot script and the CI/CD
+# deploy job rewrite it to `demo-devops.<EIP-with-dashes>.nip.io` so the
+# Let's Encrypt HTTP-01 challenge can resolve back to this host.
+#
+# TLS lives in `tls-patch.yaml` (separate file so the cert-manager
+# annotation + tls: block stays readable). See ADR-005 + ADR-008.
 patches:
   - target:
       kind: Ingress
@@ -20,7 +25,12 @@ patches:
         value: traefik
       - op: replace
         path: /spec/rules/0/host
-        value: demo-devops.example.com   # rewritten by Terraform / deploy script
+        value: demo-devops.example.com   # rewritten by user-data / deploy script
+
+  - path: tls-patch.yaml
+    target:
+      kind: Ingress
+      name: demo-devops
 
   # 1 replica on AWS due to t3.micro (1 GiB RAM) constraints.
   # The `local` overlay keeps 2 replicas + a real HPA to prove the test

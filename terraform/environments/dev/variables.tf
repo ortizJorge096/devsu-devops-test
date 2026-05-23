@@ -64,7 +64,7 @@ variable "alarm_email" {
 }
 
 variable "enable_monitoring" {
-  description = "Create the monitoring module (CloudWatch alarms + SNS). Apaga para ahorrar RAM en t3.micro o si no quieres recibir alertas."
+  description = "Create the monitoring module (CloudWatch alarms + SNS). Turn off to save RAM on t3.micro or if you don't want to receive alerts."
   type        = bool
   default     = true
 }
@@ -77,8 +77,27 @@ variable "allowed_environments" {
 
 # ─── Self-hosted GitHub Actions runner ────────────────────────────────────
 variable "github_token" {
-  description = "PAT fine-grained con Administration: read+write sobre el repo. Se inyecta en user-data del EC2 para registrar el self-hosted runner usado por el job `deploy` del workflow. Dejar vacío omite la instalación (el cluster funciona, pero el deploy del CI/CD fallará por falta de runner)."
+  description = "Fine-grained PAT with `Administration: read+write` on the repo. Injected into the EC2 user-data to register the self-hosted runner consumed by the workflow's `deploy` job. Leave empty to skip runner installation (the cluster still works, but the CI/CD `deploy` job will fail because there is no runner)."
   type        = string
   default     = ""
   sensitive   = true
+}
+
+variable "instance_type" {
+  description = "EC2 instance type. t3.micro / t2.micro are AWS Free Tier eligible (on-demand only — Spot is NOT Free Tier)."
+  type        = string
+  default     = "t3.micro"
+}
+
+# ─── TLS (Let's Encrypt on prod overlay only) ─────────────────────────────
+variable "enable_letsencrypt" {
+  description = "Install cert-manager + Let's Encrypt ClusterIssuers on the cluster. Only the `prod` overlay's Ingress consumes them — dev/local stay on traefik's self-signed cert (see ADR-008)."
+  type        = bool
+  default     = true
+}
+
+variable "letsencrypt_email" {
+  description = "Contact email used by the Let's Encrypt ACME account for expiry notifications. Defaults to alarm_email when blank."
+  type        = string
+  default     = ""
 }

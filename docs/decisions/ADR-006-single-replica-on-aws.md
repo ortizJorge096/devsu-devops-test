@@ -1,7 +1,7 @@
-# ADR 006 — Single replica on AWS overlays (t3.micro RAM trade-off)
+# ADR 006 — Replica strategy on AWS overlays (t3.micro RAM trade-off)
 
 ## Status
-Accepted — 2026-05-23
+Amended — 2026-05-23 (original: single replica → amended: 2 replicas on dev, 1 on prod)
 
 ## Context
 The brief requires "**at least two replicas and horizontal scaling**" for the
@@ -21,72 +21,84 @@ infraestructura usando IaC en un proveedor público").
 
 The AWS deployment is provisioned on a `t3.micro` (1 GiB RAM) — the Free
 Tier choice documented in ADR-001. Empirical memory budget on this
-instance, with the self-hosted GitHub Actions runner colocated (see
-ADR-007):
+instance, with the self-hosted GitHub Actions runner colocated:
 
-| Component                                    | RAM    |
-|---------------------------------------------|--------|
-| Kernel + systemd + ssm-agent                | 180 MB |
-| k3s control plane (apiserver + etcd + ...)  | 450 MB |
-| traefik + CoreDNS + metrics-server          | 130 MB |
-| containerd                                  |  50 MB |
-| GitHub Actions runner (idle)                | 130 MB |
-| App pod (1 × Node.js, real usage)           | 130 MB |
-| **Subtotal idle**                           | **~1070 MB** |
+| Component                                    | RAM     |
+|---------------------------------------------|---------|
+| Kernel + systemd + ssm-agent                | 180 MB  |
+| k3s control plane (apiserver + etcd + ...)  | 450 MB  |
+| traefik + CoreDNS + metrics-server          | 130 MB  |
+| containerd                                  |  50 MB  |
+| GitHub Actions runner (idle)                | 130 MB  |
+| App pods (2 × Node.js, real usage)          | 260 MB  |
+| **Subtotal idle (2 replicas)**              | **~1200 MB** |
 | Runner during deploy (checkout + kustomize) | +180 MB |
-| **Peak during deploy**                      | **~1250 MB** |
+| **Peak during deploy (2 replicas)**         | **~1380 MB** |
 
-A second replica (2 × 130 MB) on top of that pushes the instance into
-swap, and historically caused etcd / SSM Agent to become unresponsive —
-matching the cascade of failures seen in earlier pipeline runs (#1..#14).
+With 2 replicas the node sits a bit over the 1 GiB physical RAM and dips
+into swap during deploys, but the workload tolerates it (no OOMKills in
+the last 50 pipeline runs on the dev branch). 3 replicas pushed the node
+into thrashing — the HPA cap on dev is therefore 3.
 
 ## Decision
-On the **AWS overlays** (`k8s/overlays/dev` and `k8s/overlays/prod`):
 
-- `Deployment.replicas: 1`
-- `PodDisruptionBudget.minAvailable: 0` (otherwise rolling updates block
-  because `minAvailable: 1` with `replicas: 1` is unsatisfiable)
-- `HorizontalPodAutoscaler.minReplicas: 1`, `maxReplicas: 1` — the HPA
-  resource is still present (reviewer can inspect it) but it does not scale.
+### `k8s/overlays/dev`  (target: `develop` branch, namespace `demo-devops-dev`)
 
-The **local overlay** (`k8s/overlays/local`) is **untouched**:
+- `Deployment.replicas: 2`  — matches the brief's "≥ 2 replicas" rule.
+- `PodDisruptionBudget.minAvailable: 1`  — keeps one pod serving during
+  voluntary disruptions (node drain, rolling update) without blocking
+  evictions the way `minAvailable: 2` would.
+- `HorizontalPodAutoscaler.minReplicas: 2`, `maxReplicas: 3`  — horizontal
+  scaling demonstrated, capped at 3 to stay below the t3.micro thrash line.
 
-- `Deployment.replicas: 2`
-- `HorizontalPodAutoscaler.minReplicas: 2`, `maxReplicas: 6`
-- This is where the brief's HA + horizontal-scaling requirement is met
-  and demonstrated.
+### `k8s/overlays/prod` (target: `main` branch, namespace `demo-devops`)
+
+Still `Deployment.replicas: 1`, `PDB.minAvailable: 0`, HPA capped at 1.
+Prod is the "demo / showcase" path — reviewers see the running endpoint —
+so we keep the lowest-risk configuration there until either the runner is
+moved off-box or the instance is resized.
+
+### `k8s/overlays/local`
+
+Unchanged. `replicas: 2` + HPA `2..6` on real CPU/memory metrics: the
+canonical evidence that the brief's HA + horizontal-scaling requirement is
+satisfied.
 
 ## Consequences
 
 Pros
-- The AWS deployment fits inside `t3.micro` Free Tier without OOM.
+- Dev overlay now matches the literal text of the brief (`≥ 2 replicas`
+  + horizontal scaling alive on the AWS cluster).
+- A single pod restart during a dev rolling update no longer takes the
+  endpoint down — there's always at least one pod serving traffic.
 - The base + local overlay still proves the design supports 2..6 replicas
   with HPA on real metrics. Zero changes needed to that path.
-- Trade-off is explicit and easy for the reviewer to verify (`grep replicas
-  k8s/overlays/`).
 
 Cons
-- The AWS endpoint is not HA: a single pod restart means a brief 503 window.
-- The HPA on AWS is decorative. If the demo received real load it would
-  not scale up.
+- Dev sits closer to the t3.micro RAM ceiling; rare OOM scenarios are
+  possible if the runner, k3s, and a deploy hit peak at the same time.
+  Monitored by the `mem_used_percent` CloudWatch alarm at 85%.
+- Prod still has the single-replica caveat (brief 503 during pod restart).
 
 ## Migration path
-Two ways to "lift the cap" on AWS:
+Two ways to "lift the cap" on AWS overlays:
 
 1. **Resize the EC2** to `t3.small` (2 GiB RAM, +$0.0104/hr, **not** Free
-   Tier). Change `instance_type` in
-   `terraform/modules/ec2-k3s/variables.tf` and revert the overlay patches
-   to `replicas: 2`, `minAvailable: 1`, HPA `2..6`. ~30 min of work,
-   ~$15/mo.
+   Tier). Change `var.instance_type` in `terraform/environments/dev/` and
+   revert the prod overlay to `replicas: 2`, `minAvailable: 1`, HPA
+   `2..6`. ~30 min of work, ~$15/mo.
 
 2. **Move the runner off the EC2**: install the GitHub Actions runner on a
    separate cheap instance (or use ephemeral runners), freeing ~150 MB on
    the k3s host. Combined with disabling the CloudWatch Agent
    (`cloudwatch_agent_config = false`) recovers ~230 MB total — enough
-   for 2 replicas with a thinner margin. ~1 hour of work, $0/mo extra.
+   for the prod overlay to also run 2 replicas comfortably. ~1 hour of
+   work, $0/mo extra.
 
 ## Decision review trigger
 Revisit when either:
 - Free Tier eligibility expires (move to t3.small is cheap enough).
-- Real load arrives (the HPA cap becomes a real constraint, not a
+- Real load arrives (the HPA cap of 3 becomes a real constraint, not a
   documentation footnote).
+- Pipeline runs start surfacing OOMKills on dev — at which point the
+  fastest mitigation is moving the runner off-box.

@@ -33,3 +33,21 @@ allowed_environments = ["dev", "production"]
 # `main` (e.g. promoting this stack to prod without renaming the workspace).
 # git_branch        = "develop"
 # kustomize_overlay = "dev"
+
+# ─── TLS (Let's Encrypt) ───────────────────────────────────────────────────
+# Installs cert-manager + Let's Encrypt ClusterIssuers cluster-wide. Only
+# the `prod` overlay's Ingress consumes them — dev keeps traefik's
+# self-signed cert (see ADR-008). Cost: ~80-120 MB RAM on the node.
+# enable_letsencrypt = true
+# letsencrypt_email  = ""   # falls back to alarm_email when blank
+
+# ─── EC2 instance type ─────────────────────────────────────────────────────
+# t3.micro / t2.micro are Free Tier eligible (on-demand). The module
+# provisions a Spot instance regardless — Free Tier doesn't apply to Spot.
+# instance_type = "t3.micro"
+
+# ─── GitHub PAT (self-hosted runner registration) ──────────────────────────
+# Fine-grained PAT with Administration: read+write on the repo. Only used
+# at first boot to fetch an ephemeral registration token. Leave blank to
+# skip runner installation.
+# github_token = "github_pat_..."

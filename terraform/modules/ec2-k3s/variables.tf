@@ -69,6 +69,22 @@ variable "cloudwatch_agent_config" {
   default     = true
 }
 
+# ─── Let's Encrypt (cert-manager) ─────────────────────────────────────────
+# Adds ~80-120 MB RAM cluster-wide (cert-manager controller + webhook +
+# cainjector). Only the prod overlay's Ingress consumes the issuer —
+# dev/local Ingresses stay self-signed (see ADR-008).
+variable "enable_letsencrypt" {
+  description = "Install cert-manager on first boot and provision Let's Encrypt ClusterIssuers (prod + staging). The prod overlay's Ingress is annotated to use `letsencrypt-prod`; dev overlay stays on traefik's self-signed cert."
+  type        = bool
+  default     = false
+}
+
+variable "letsencrypt_email" {
+  description = "Contact email for the Let's Encrypt ACME account. Required when enable_letsencrypt is true — Let's Encrypt uses it for expiry notifications. Not exposed publicly."
+  type        = string
+  default     = ""
+}
+
 variable "tags" {
   description = "Extra tags."
   type        = map(string)
@@ -77,20 +93,20 @@ variable "tags" {
 
 # ─── Self-hosted GitHub Actions runner ────────────────────────────────────
 variable "github_token" {
-  description = "PAT fine-grained con Administration: read+write sobre el repo (o classic con scope `repo`). Sólo se usa en user-data para obtener un registration-token efímero. Dejar vacío omite la instalación del runner."
+  description = "Fine-grained PAT with `Administration: read+write` on the repo (or classic with `repo` scope). Used in user-data only to fetch an ephemeral runner registration-token. Leave empty to skip the runner install."
   type        = string
   default     = ""
   sensitive   = true
 }
 
 variable "runner_labels" {
-  description = "Labels del self-hosted runner. El workflow apunta a `k3s-deploy`."
+  description = "Labels of the self-hosted runner. The CI/CD workflow targets the `k3s-deploy` label."
   type        = string
   default     = "self-hosted,linux,x64,k3s-deploy"
 }
 
 variable "runner_version" {
-  description = "Versión del actions/runner a instalar."
+  description = "actions/runner version to install."
   type        = string
   default     = "2.319.1"
 }

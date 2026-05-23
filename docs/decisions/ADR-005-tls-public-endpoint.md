@@ -2,6 +2,10 @@
 
 ## Status
 Accepted — 2026-05-21
+Superseded in part — 2026-05-23: path B (cert-manager + Let's Encrypt
+via nip.io) is now implemented on the `prod` overlay. See **ADR-008**
+for the implementation decision. The "self-signed default" still applies
+to the `dev` and `local` overlays.
 
 ## Context
 The brief asks for a publicly reachable endpoint. The endpoint we

@@ -270,13 +270,40 @@ jobs:
           fi
           kustomize version
 
+      - name: Resolve nip.io host for prod (via IMDSv2)
+        # Runs only on the prod path. The runner is colocated with the
+        # k3s node, so the EC2 public IPv4 == the Elastic IP attached to
+        # this instance. We use it to build a `demo-devops.<ip-dashed>.nip.io`
+        # FQDN that Let's Encrypt's HTTP-01 challenge can resolve back here.
+        id: host
+        if: steps.env.outputs.overlay == 'prod'
+        run: |
+          set -euo pipefail
+          TOKEN=$(curl -fsSL -X PUT "http://169.254.169.254/latest/api/token" \
+            -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+          IP=$(curl -fsSL -H "X-aws-ec2-metadata-token: $TOKEN" \
+            http://169.254.169.254/latest/meta-data/public-ipv4)
+          HOST="demo-devops.${IP//./-}.nip.io"
+          echo "host=$HOST" >> "$GITHUB_OUTPUT"
+          echo "Prod public host: $HOST"
+
       - name: Set image tag and apply
         env:
           IMG: ${{ needs.build-push.outputs.sha_tag }}
           OVERLAY: ${{ steps.env.outputs.overlay }}
           NS: ${{ steps.env.outputs.namespace }}
+          PROD_HOST: ${{ steps.host.outputs.host }}
         run: |
           set -euxo pipefail
+          # On prod, sed-replace the placeholder host in both the Ingress
+          # patch (kustomization.yaml) and the TLS strategic-merge patch
+          # (tls-patch.yaml) so cert-manager + traefik agree on the FQDN.
+          if [ "$OVERLAY" = "prod" ] && [ -n "$PROD_HOST" ]; then
+            sed -i "s|demo-devops.example.com|${PROD_HOST}|g" \
+              k8s/overlays/prod/kustomization.yaml \
+              k8s/overlays/prod/tls-patch.yaml
+          fi
+
           cd k8s/overlays/"$OVERLAY"
           kustomize edit set image devsu-devops-nodejs="$IMG"
           cd "$GITHUB_WORKSPACE"
@@ -284,10 +311,11 @@ jobs:
           kustomize build k8s/overlays/"$OVERLAY" | kubectl apply -f -
           kubectl -n "$NS" rollout status deployment/demo-devops --timeout=300s
 
-      - name: Print cluster state (auditoría)
+      - name: Print cluster state (audit)
         if: always()
         env:
           NS: ${{ steps.env.outputs.namespace }}
+          OVERLAY: ${{ steps.env.outputs.overlay }}
         run: |
           echo "── Pods ──"
           kubectl -n "$NS" get pods -o wide
@@ -297,3 +325,8 @@ jobs:
           kubectl -n "$NS" get ingress
           echo "── HPA ──"
           kubectl -n "$NS" get hpa || true
+          if [ "$OVERLAY" = "prod" ]; then
+            echo "── cert-manager / Let's Encrypt ──"
+            kubectl -n "$NS" get certificate,certificaterequest,order,challenge 2>/dev/null || \
+              echo "(cert-manager CRDs not present — TLS will fall back to traefik self-signed)"
+          fi

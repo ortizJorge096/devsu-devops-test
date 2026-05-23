@@ -29,8 +29,13 @@ output "app_url" {
 }
 
 output "app_url_https" {
-  description = "Public app URL over HTTPS (self-signed cert; see ADR-005 for upgrade paths)."
-  value       = var.enable_ec2_k3s ? "https://${module.k3s[0].public_ip}/api/users" : null
+  description = "Public app URL over HTTPS on the prod overlay. With enable_letsencrypt = true and ADR-008 wired, this resolves to a real green-padlock Let's Encrypt cert; otherwise traefik serves its self-signed cert (browser warning)."
+  value       = var.enable_ec2_k3s ? module.k3s[0].app_url_https : null
+}
+
+output "letsencrypt_host" {
+  description = "nip.io FQDN used as the Let's Encrypt SAN (host for the prod Ingress + ACME HTTP-01 challenge target)."
+  value       = var.enable_ec2_k3s ? module.k3s[0].letsencrypt_host : null
 }
 
 output "health_url" {

@@ -1,18 +1,26 @@
 #!/bin/bash
 # k3s + ECR + CloudWatch Agent bootstrap.
-# Runs on first boot of an Amazon Linux 2023 t3.micro.
+# Runs on first boot of an Amazon Linux 2023 EC2 (Spot t3.micro by default).
 #
 # What it does:
 #   1) Install OS deps + amazon-ecr-credential-helper.
 #   2) Install k3s (containerd-based, certified Kubernetes).
-#   3) Configure containerd to pull from ECR via the EC2 instance profile.
-#   4) (Optional) Install CloudWatch Agent for memory/disk metrics.
-#   5) Clone the GitHub repo at ${git_branch} and apply the ${kustomize_overlay} overlay.
+#   3) Configure containerd to pull from ECR via the EC2 instance profile,
+#      with a systemd timer that refreshes the auth token every 8h.
+#   4) (Optional) Install CloudWatch Agent for memory/disk metrics + logs.
+#   5) Clone the GitHub repo at ${git_branch} and apply the
+#      ${kustomize_overlay} overlay.
+#   6) (Optional) Register this host as a GitHub Actions self-hosted runner
+#      so the pipeline's `deploy` job can land here directly.
+#
+# All logs go to /var/log/userdata.log; SSM Session Manager + the
+# CloudWatch agent both ship it for off-box inspection.
 set -euxo pipefail
 exec > /var/log/userdata.log 2>&1
 
+# AL2023 ships awscli v2 in the base image; we only add what's missing.
 dnf -y update
-dnf -y install --allowerasing curl tar git jq awscli
+dnf -y install --allowerasing curl tar git jq
 
 # ─── amazon-ecr-credential-helper ─────────────────────────────────────────
 dnf -y install amazon-ecr-credential-helper || {
@@ -78,20 +86,76 @@ for i in {1..60}; do
 done
 
 # ─── ECR registry config for containerd ───────────────────────────────────
+# k3s' containerd does NOT support Docker credential helpers in
+# registries.yaml — the `configs.<host>.auth` block expects literal
+# `username` + `password`. So we fetch an ECR auth token via the instance
+# profile (AmazonEC2ContainerRegistryReadOnly) and inline it.
+#
+# ECR tokens expire after 12h. A systemd timer below refreshes the file
+# every 8h to stay well under that window.
 ECR_HOST="$(echo "${image_ref}" | awk -F/ '{print $1}')"
 mkdir -p /etc/rancher/k3s
-cat > /etc/rancher/k3s/registries.yaml <<REGEOF
+
+# Refresh script — used at boot AND by the systemd timer below.
+cat > /usr/local/sbin/refresh-ecr-token.sh <<REFRESH_EOF
+#!/bin/bash
+set -euo pipefail
+REGION="${aws_region}"
+ECR_HOST="$${ECR_HOST}"
+TOKEN=\$(aws ecr get-login-password --region "\$REGION")
+cat > /etc/rancher/k3s/registries.yaml <<YAML
 mirrors:
-  "$${ECR_HOST}":
+  "\$ECR_HOST":
     endpoint:
-      - "https://$${ECR_HOST}"
+      - "https://\$ECR_HOST"
 configs:
-  "$${ECR_HOST}":
-    auth: {}
-REGEOF
+  "\$ECR_HOST":
+    auth:
+      username: AWS
+      password: "\$TOKEN"
+YAML
+chmod 600 /etc/rancher/k3s/registries.yaml
+# k3s 1.27+ watches registries.yaml and reloads containerd automatically,
+# but a kill -HUP on containerd is the documented "pick up changes now" path.
+systemctl kill -s HUP k3s 2>/dev/null || systemctl restart k3s
+REFRESH_EOF
+chmod 0755 /usr/local/sbin/refresh-ecr-token.sh
 
+# First-boot population (before we start the cluster apply).
+/usr/local/sbin/refresh-ecr-token.sh
+
+# Systemd timer — refresh every 8h, also on boot.
+cat > /etc/systemd/system/refresh-ecr-token.service <<'UNIT_EOF'
+[Unit]
+Description=Refresh ECR pull credentials for k3s/containerd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/refresh-ecr-token.sh
+UNIT_EOF
+
+cat > /etc/systemd/system/refresh-ecr-token.timer <<'TIMER_EOF'
+[Unit]
+Description=Refresh ECR token every 8h (token TTL is 12h)
+
+[Timer]
+OnBootSec=8h
+OnUnitActiveSec=8h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TIMER_EOF
+
+systemctl daemon-reload
+systemctl enable --now refresh-ecr-token.timer
+
+# Keep docker-credential-ecr-login wired for tools that DO honor it
+# (kustomize image lookups, ad-hoc `docker pull` from the box). Containerd
+# itself uses the registries.yaml auth block above.
 ln -sf /usr/local/bin/docker-credential-ecr-login /usr/bin/docker-credential-ecr-login || true
-
 mkdir -p /root/.docker
 cat > /root/.docker/config.json <<DOCKERCFG
 {
@@ -117,6 +181,65 @@ curl -sSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustom
 
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
+# ─── cert-manager + Let's Encrypt ClusterIssuers ──────────────────────────
+# Installed cluster-wide but only the `prod` overlay's Ingress is annotated
+# to consume it (cert-manager.io/cluster-issuer: letsencrypt-prod). dev/local
+# overlays stay on traefik's self-signed cert. See ADR-008.
+#
+# We provision TWO ClusterIssuers:
+#   - letsencrypt-staging: dummy intermediate, no rate limits — used to
+#     dry-run the ACME flow when iterating.
+#   - letsencrypt-prod: real, trusted certs. Rate-limited (5 certs/week
+#     per registered domain; nip.io counts as one shared eTLD+1).
+%{ if enable_letsencrypt ~}
+CERT_MANAGER_VERSION=v1.15.3
+echo "── Installing cert-manager $${CERT_MANAGER_VERSION} ──"
+kubectl --kubeconfig $${KUBECONFIG} apply \
+  -f "https://github.com/cert-manager/cert-manager/releases/download/$${CERT_MANAGER_VERSION}/cert-manager.yaml"
+
+# Wait for the webhook to be Ready before we apply any ClusterIssuer —
+# otherwise the admission call races and fails with "connection refused".
+echo "── Waiting for cert-manager webhook ──"
+kubectl --kubeconfig $${KUBECONFIG} -n cert-manager \
+  wait --for=condition=Available --timeout=180s deployment/cert-manager-webhook || true
+kubectl --kubeconfig $${KUBECONFIG} -n cert-manager \
+  wait --for=condition=Available --timeout=180s deployment/cert-manager || true
+kubectl --kubeconfig $${KUBECONFIG} -n cert-manager \
+  wait --for=condition=Available --timeout=180s deployment/cert-manager-cainjector || true
+
+cat <<ISSUERS_EOF | kubectl --kubeconfig $${KUBECONFIG} apply -f -
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: ${letsencrypt_email}
+    privateKeySecretRef:
+      name: letsencrypt-staging-account
+    solvers:
+      - http01:
+          ingress:
+            class: traefik
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: ${letsencrypt_email}
+    privateKeySecretRef:
+      name: letsencrypt-prod-account
+    solvers:
+      - http01:
+          ingress:
+            class: traefik
+ISSUERS_EOF
+%{ endif ~}
+
 # ─── Deploy the app from the repo's ${kustomize_overlay} overlay ──────────
 # The branch and overlay are environment-specific:
 #   - dev environment  → branch=develop, overlay=dev
@@ -130,7 +253,12 @@ git clone --depth 1 --branch "${git_branch}" \
 cd repo
 
 OVERLAY_DIR="k8s/overlays/${kustomize_overlay}"
-sed -i "s|demo-devops.example.com|${public_host}|g" "$${OVERLAY_DIR}/kustomization.yaml" || true
+# Substitute the placeholder host in EVERY overlay file (kustomization.yaml,
+# tls-patch.yaml, …). Needed because the cert-manager tls: block lives in a
+# strategic-merge patch (see ADR-008) — missing this means cert-manager
+# would order for the placeholder hostname and the ACME challenge would fail.
+find "$${OVERLAY_DIR}" -maxdepth 2 -type f \( -name '*.yaml' -o -name '*.yml' \) \
+  -exec sed -i "s|demo-devops.example.com|${public_host}|g" {} +
 
 cd "$${OVERLAY_DIR}"
 kustomize edit set image devsu-devops-nodejs=${image_ref}
@@ -146,26 +274,48 @@ kustomize build "$${OVERLAY_DIR}" | kubectl --kubeconfig $${KUBECONFIG} apply -f
 kubectl --kubeconfig $${KUBECONFIG} -n "$${APP_NS}" rollout status deployment/demo-devops --timeout=300s || true
 kubectl --kubeconfig $${KUBECONFIG} -n "$${APP_NS}" get pods,svc,ingress
 
+# If the pod is still pending or stuck in ContainerCreating, dump the events
+# and pod description into the userdata log. Most common reasons here:
+#   - ECR `:latest` doesn't exist yet (first apply, CI hasn't pushed)
+#   - Slow first pull on t3.micro (large image, 100-300 MB)
+#   - registries.yaml not yet picked up by containerd
+# 60s is enough to absorb a normal first pull from ECR on t3.micro; if it
+# still isn't ready we dump diagnostics (non-fatal — the CI/CD deploy job
+# will re-roll the deployment once the image lands).
+if ! kubectl --kubeconfig $${KUBECONFIG} -n "$${APP_NS}" \
+      wait --for=condition=Ready pod -l app.kubernetes.io/name=demo-devops --timeout=60s 2>/dev/null; then
+  echo "── Pod not Ready yet, dumping diagnostics ──"
+  kubectl --kubeconfig $${KUBECONFIG} -n "$${APP_NS}" describe pod -l app.kubernetes.io/name=demo-devops || true
+  kubectl --kubeconfig $${KUBECONFIG} -n "$${APP_NS}" get events --sort-by=.lastTimestamp | tail -30 || true
+fi
+
 # ─── GitHub Actions self-hosted runner ────────────────────────────────────
-# Registra este EC2 como runner del repositorio. El job `deploy` del workflow
-# usa `runs-on: [self-hosted, k3s-deploy]` para correr aquí mismo, así que
-# `kubectl apply` se ejecuta directo contra el k3s local — sin SSM, sin
-# heredocs anidados, sin IPC timeouts.
+# Registers this EC2 as a runner of the repo. The `deploy` job of the
+# workflow uses `runs-on: [self-hosted, k3s-deploy]` to land here, so
+# `kubectl apply` runs straight against local k3s — no SSM, no nested
+# heredocs, no IPC timeouts.
 #
-# Si github_token está vacío, se omite (útil para apply sin runner).
+# If github_token is empty the whole block is skipped (useful for an
+# apply without runner registration).
 %{ if github_token != "" ~}
+# The actions-runner ships a .NET 6 binary that depends on libicu for
+# globalization support. AL2023 doesn't ship libicu by default, so
+# `./config.sh` aborts with "Libicu's dependencies is missing for Dotnet
+# Core 6.0". Install it explicitly.
+dnf -y install libicu
+
 id ghrunner &>/dev/null || useradd -m -s /bin/bash ghrunner
 
-# kubeconfig accesible al runner (k3s ya lo expone mode 644)
+# kubeconfig readable by the runner (k3s already exposes it mode 644)
 mkdir -p /home/ghrunner/.kube
 cp /etc/rancher/k3s/k3s.yaml /home/ghrunner/.kube/config
 chown -R ghrunner:ghrunner /home/ghrunner/.kube
 chmod 600 /home/ghrunner/.kube/config
 
-# kubectl en PATH para el runner (k3s lo trae embebido)
+# kubectl in PATH for the runner (k3s ships it embedded)
 ln -sf /usr/local/bin/k3s /usr/local/bin/kubectl 2>/dev/null || true
 
-# Descargar y registrar el runner como ghrunner
+# Download + register the runner as ghrunner
 sudo -u ghrunner -H env \
   GITHUB_TOKEN="${github_token}" \
   GITHUB_OWNER="${github_owner}" \
@@ -184,7 +334,7 @@ if [ ! -f ./config.sh ]; then
   rm runner.tar.gz
 fi
 
-# Token de registro efímero (válido 1h, consumido al registrar)
+# Ephemeral registration token (1h TTL, consumed on register)
 REG_TOKEN=$(curl -fsS -X POST \
   -H "Accept: application/vnd.github+json" \
   -H "Authorization: Bearer $${GITHUB_TOKEN}" \
@@ -193,7 +343,7 @@ REG_TOKEN=$(curl -fsS -X POST \
   | jq -r '.token')
 
 if [ -z "$REG_TOKEN" ] || [ "$REG_TOKEN" = "null" ]; then
-  echo "ERROR: No se pudo obtener registration-token (PAT inválido?)" >&2
+  echo "ERROR: could not obtain registration-token (invalid PAT?)" >&2
   exit 1
 fi
 
@@ -205,13 +355,13 @@ fi
   --work _work
 RUNNER_EOF
 
-# Servicio systemd (instalado como root, corre como ghrunner)
+# Systemd service (installed as root, runs as ghrunner)
 cd /home/ghrunner/actions-runner
 ./svc.sh install ghrunner
 ./svc.sh start
 
-# Limpiar referencias al PAT en el log
+# Scrub PAT references from the log
 sed -i 's|Authorization: Bearer [^"]*|Authorization: Bearer REDACTED|g' /var/log/userdata.log || true
 
-echo "Self-hosted runner registrado y corriendo"
+echo "Self-hosted runner registered and running"
 %{ endif ~}

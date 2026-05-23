@@ -1,0 +1,24 @@
+# Strategic-merge patch: annotates the Ingress so cert-manager (installed
+# cluster-wide by the EC2 user-data when enable_letsencrypt = true) orders
+# a Let's Encrypt cert via HTTP-01 and stores it in `demo-devops-tls`.
+# Traefik then terminates TLS using that secret.
+#
+# The host below is a placeholder — user-data / the CI deploy step rewrite
+# `demo-devops.example.com` to the actual nip.io FQDN derived from the EIP.
+# If cert-manager isn't installed on the cluster, the annotation is a no-op
+# and the Ingress falls back to traefik's default self-signed cert
+# (graceful degradation; the app still serves on :443).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: demo-devops
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # Force traefik to redirect plain HTTP to HTTPS once the cert is ready.
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  tls:
+    - hosts:
+        - demo-devops.example.com
+      secretName: demo-devops-tls

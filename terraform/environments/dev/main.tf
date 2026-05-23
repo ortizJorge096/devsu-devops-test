@@ -44,7 +44,7 @@ module "k3s" {
   source = "../../modules/ec2-k3s"
 
   name          = "${var.name_prefix}-k3s"
-  instance_type = "t3.micro"
+  instance_type = var.instance_type
 
   # Custom network (no default VPC).
   vpc_id    = module.network.vpc_id
@@ -52,7 +52,7 @@ module "k3s" {
 
   github_owner = var.github_owner
   github_repo  = var.github_repo
-  github_token = var.github_token   # registra self-hosted runner en boot
+  github_token = var.github_token   # registers the self-hosted runner at boot
 
   # Multi-environment: this environment tracks `develop` and applies the
   # `dev` overlay at first boot. Override via terraform.tfvars if needed.
@@ -64,6 +64,12 @@ module "k3s" {
   aws_region              = var.region
   public_host             = ""
   cloudwatch_agent_config = true
+
+  # Let's Encrypt — see ADR-008. Only the prod overlay's Ingress consumes
+  # the issuer; dev/local stay self-signed. Falls back to alarm_email if
+  # letsencrypt_email isn't set explicitly.
+  enable_letsencrypt = var.enable_letsencrypt
+  letsencrypt_email  = coalesce(var.letsencrypt_email != "" ? var.letsencrypt_email : null, var.alarm_email != "" ? var.alarm_email : null, "devops-notify@example.com")
 
   # Tags used by the CI pipeline to locate the instance via SSM (filters by
   # Component=runtime AND Project=<repo-name>).
