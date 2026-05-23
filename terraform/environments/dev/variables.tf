@@ -101,3 +101,9 @@ variable "letsencrypt_email" {
   type        = string
   default     = ""
 }
+
+variable "runner_labels" {
+  description = "Labels of the self-hosted runner."
+  type        = string
+  default     = "self-hosted,linux,x64,k3s-deploy,k3s-dev"
+}

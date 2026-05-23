@@ -101,3 +101,10 @@ variable "letsencrypt_email" {
   type        = string
   default     = ""
 }
+
+
+variable "runner_labels" {
+  description = "Labels of the self-hosted runner. The CI/CD workflow targets specific labels per environment."
+  type        = string
+  default     = "self-hosted,linux,x64,k3s-deploy,k3s-prod"
+}

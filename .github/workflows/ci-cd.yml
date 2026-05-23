@@ -224,26 +224,24 @@ jobs:
             out/local.yaml out/dev.yaml out/prod.yaml
 
   # ───────────────────────────────────────────────────────────────────────
-  # 7) Deploy a k3s — self-hosted runner en el propio EC2
+  # 7) Deploy to k3s — DEV (develop branch)
   #
-  # El runner corre dentro del EC2 que aloja k3s. kubectl es directo,
-  # sin SSM, sin OIDC, sin credenciales AWS: el kubeconfig local
-  # (/home/ghrunner/.kube/config, copiado de /etc/rancher/k3s/k3s.yaml en
-  # user-data) tiene cluster-admin sobre el k3s local. Containerd ya está
-  # autenticado a ECR vía amazon-ecr-credential-helper + el instance
-  # profile, así que el pull de la imagen funciona sin imagePullSecrets.
+  # The runner lives inside the EC2 that hosts k3s-dev. kubectl is direct —
+  # no SSM, no OIDC, no AWS credentials needed: the local kubeconfig
+  # (/home/ghrunner/.kube/config, copied from /etc/rancher/k3s/k3s.yaml
+  # in user-data) holds cluster-admin over the local k3s. containerd is
+  # already authenticated to ECR via the instance profile, so image pulls
+  # work without imagePullSecrets.
   # ───────────────────────────────────────────────────────────────────────
-  deploy:
-    name: Deploy to k3s (self-hosted)
-    runs-on: [self-hosted, k3s-deploy]
+  deploy-dev:
+    name: Deploy to k3s (dev)
+    runs-on: [self-hosted, k3s-dev]
     needs: [build-push, image-scan, validate-k8s]
-    if: |
-      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
-      && github.event_name == 'push'
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
 
     environment:
-      name: ${{ github.ref == 'refs/heads/main' && 'production' || 'dev' }}
-      url: ${{ vars.APP_URL }}
+      name: dev
+      url: ${{ vars.APP_URL_DEV }}
 
     permissions:
       contents: read
@@ -251,18 +249,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve environment overlay
-        id: env
-        run: |
-          if [ '${{ github.ref_name }}' = 'main' ]; then
-            echo "overlay=prod"            >> "$GITHUB_OUTPUT"
-            echo "namespace=demo-devops"   >> "$GITHUB_OUTPUT"
-          else
-            echo "overlay=dev"                  >> "$GITHUB_OUTPUT"
-            echo "namespace=demo-devops-dev"    >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Install kustomize (si no está)
+      - name: Install kustomize (if missing)
         run: |
           if ! command -v kustomize >/dev/null 2>&1; then
             curl -sSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz" \
@@ -270,13 +257,70 @@ jobs:
           fi
           kustomize version
 
-      - name: Resolve nip.io host for prod (via IMDSv2)
-        # Runs only on the prod path. The runner is colocated with the
-        # k3s node, so the EC2 public IPv4 == the Elastic IP attached to
-        # this instance. We use it to build a `demo-devops.<ip-dashed>.nip.io`
-        # FQDN that Let's Encrypt's HTTP-01 challenge can resolve back here.
+      - name: Set image tag and apply
+        env:
+          IMG: ${{ needs.build-push.outputs.sha_tag }}
+        run: |
+          set -euxo pipefail
+          cd k8s/overlays/dev
+          kustomize edit set image devsu-devops-nodejs="$IMG"
+          cd "$GITHUB_WORKSPACE"
+          kustomize build k8s/overlays/dev | kubectl apply -f -
+          kubectl -n demo-devops-dev rollout status deployment/demo-devops --timeout=300s
+
+      - name: Print cluster state (audit)
+        if: always()
+        run: |
+          echo "── Pods ──"
+          kubectl -n demo-devops-dev get pods -o wide
+          echo "── Services ──"
+          kubectl -n demo-devops-dev get svc
+          echo "── Ingress ──"
+          kubectl -n demo-devops-dev get ingress
+          echo "── HPA ──"
+          kubectl -n demo-devops-dev get hpa || true
+
+  # ───────────────────────────────────────────────────────────────────────
+  # 8) Deploy to k3s — PROD (main branch)
+  #
+  # The runner lives inside the EC2 that hosts k3s-prod. kubectl is direct —
+  # no SSM, no OIDC, no AWS credentials needed: the local kubeconfig holds
+  # cluster-admin over the local k3s. containerd is authenticated to ECR
+  # via the instance profile. The nip.io host is resolved via IMDSv2 so
+  # cert-manager and traefik agree on the FQDN for the Let's Encrypt
+  # HTTP-01 challenge (see ADR-005 + ADR-008).
+  # ───────────────────────────────────────────────────────────────────────
+  deploy-prod:
+    name: Deploy to k3s (prod)
+    runs-on: [self-hosted, k3s-prod]
+    needs: [build-push, image-scan, validate-k8s]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    environment:
+      name: production
+      url: ${{ vars.APP_URL_PROD }}
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kustomize (if missing)
+        run: |
+          if ! command -v kustomize >/dev/null 2>&1; then
+            curl -sSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz" \
+              | sudo tar -xz -C /usr/local/bin
+          fi
+          kustomize version
+
+      - name: Resolve nip.io host (IMDSv2)
+        # The runner is colocated with the k3s-prod node, so the EC2 public
+        # IPv4 equals the Elastic IP attached to this instance. We derive
+        # demo-devops.<ip-dashed>.nip.io — a free wildcard DNS that resolves
+        # back to that IP — so Let's Encrypt's HTTP-01 challenge can succeed
+        # without owning a real domain.
         id: host
-        if: steps.env.outputs.overlay == 'prod'
         run: |
           set -euo pipefail
           TOKEN=$(curl -fsSL -X PUT "http://169.254.169.254/latest/api/token" \
@@ -290,43 +334,34 @@ jobs:
       - name: Set image tag and apply
         env:
           IMG: ${{ needs.build-push.outputs.sha_tag }}
-          OVERLAY: ${{ steps.env.outputs.overlay }}
-          NS: ${{ steps.env.outputs.namespace }}
           PROD_HOST: ${{ steps.host.outputs.host }}
         run: |
           set -euxo pipefail
-          # On prod, sed-replace the placeholder host in both the Ingress
-          # patch (kustomization.yaml) and the TLS strategic-merge patch
-          # (tls-patch.yaml) so cert-manager + traefik agree on the FQDN.
-          if [ "$OVERLAY" = "prod" ] && [ -n "$PROD_HOST" ]; then
-            sed -i "s|demo-devops.example.com|${PROD_HOST}|g" \
-              k8s/overlays/prod/kustomization.yaml \
-              k8s/overlays/prod/tls-patch.yaml
-          fi
+          # Replace the placeholder host in both the Ingress patch
+          # (kustomization.yaml) and the TLS strategic-merge patch
+          # (tls-patch.yaml) so cert-manager and traefik agree on the FQDN.
+          sed -i "s|demo-devops.example.com|${PROD_HOST}|g" \
+            k8s/overlays/prod/kustomization.yaml \
+            k8s/overlays/prod/tls-patch.yaml
 
-          cd k8s/overlays/"$OVERLAY"
+          cd k8s/overlays/prod
           kustomize edit set image devsu-devops-nodejs="$IMG"
           cd "$GITHUB_WORKSPACE"
 
-          kustomize build k8s/overlays/"$OVERLAY" | kubectl apply -f -
-          kubectl -n "$NS" rollout status deployment/demo-devops --timeout=300s
+          kustomize build k8s/overlays/prod | kubectl apply -f -
+          kubectl -n demo-devops rollout status deployment/demo-devops --timeout=300s
 
       - name: Print cluster state (audit)
         if: always()
-        env:
-          NS: ${{ steps.env.outputs.namespace }}
-          OVERLAY: ${{ steps.env.outputs.overlay }}
         run: |
           echo "── Pods ──"
-          kubectl -n "$NS" get pods -o wide
+          kubectl -n demo-devops get pods -o wide
           echo "── Services ──"
-          kubectl -n "$NS" get svc
+          kubectl -n demo-devops get svc
           echo "── Ingress ──"
-          kubectl -n "$NS" get ingress
+          kubectl -n demo-devops get ingress
           echo "── HPA ──"
-          kubectl -n "$NS" get hpa || true
-          if [ "$OVERLAY" = "prod" ]; then
-            echo "── cert-manager / Let's Encrypt ──"
-            kubectl -n "$NS" get certificate,certificaterequest,order,challenge 2>/dev/null || \
-              echo "(cert-manager CRDs not present — TLS will fall back to traefik self-signed)"
-          fi
+          kubectl -n demo-devops get hpa || true
+          echo "── cert-manager / Let's Encrypt ──"
+          kubectl -n demo-devops get certificate,certificaterequest,order,challenge 2>/dev/null || \
+            echo "(cert-manager CRDs not present — TLS will fall back to traefik self-signed)"
