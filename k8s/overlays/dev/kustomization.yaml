@@ -41,8 +41,8 @@ patches:
         value: traefik
       - op: replace
         path: /spec/rules/0/host
-        value: demo-devops.54.84.139.24.nip.io --- REPLACE --- # The deploy script replaces this with the Elastic IP DNS name.
-        
+        value: demo-devops.54.84.139.24.nip.io
+
   # With 1 replica, minAvailable must be 0 — otherwise the PDB blocks
   # evictions during rolling updates and deploys hang indefinitely.
   - target:
