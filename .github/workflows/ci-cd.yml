@@ -106,7 +106,7 @@ jobs:
     needs: [test, sast]
     permissions:
       contents: read
-      id-token: write   # required to fetch the OIDC JWT
+      id-token: write  # required to fetch the OIDC JWT
     outputs:
       image: ${{ steps.tags.outputs.image }}
       digest: ${{ steps.build.outputs.digest }}
@@ -228,7 +228,7 @@ jobs:
   # 7) Deploy to k3s on EC2 via SSM Send-Command
   #
   # Branch → Environment mapping (configured in GitHub UI per environment):
-  #   - main    → production  (manual approval recommended)
+  #   - main    → production (manual approval recommended)
   #   - develop → dev
   #
   # No SSH: uses AWS Systems Manager (SSM) Send-Command. The IAM role assumed
@@ -245,11 +245,11 @@ jobs:
 
     environment:
       name: ${{ github.ref == 'refs/heads/main' && 'production' || 'dev' }}
-      url:  ${{ vars.APP_URL }}
+      url: ${{ vars.APP_URL }}
 
     permissions:
       contents: read
-      id-token: write   # OIDC to assume the AWS role
+      id-token: write  # OIDC to assume the AWS role
     steps:
       - uses: actions/checkout@v4
 
@@ -280,58 +280,78 @@ jobs:
         id: env
         run: |
           # Branch → overlay + namespace mapping.
-          # main → prod overlay  (namespace: demo-devops)
-          # develop → dev overlay (namespace: demo-devops-dev)
+          #   main    → prod overlay (namespace: demo-devops)
+          #   develop → dev  overlay (namespace: demo-devops-dev)
           if [ '${{ github.ref_name }}' = 'main' ]; then
-            echo "overlay=prod"        >> "$GITHUB_OUTPUT"
-            echo "namespace=demo-devops"     >> "$GITHUB_OUTPUT"
+            echo "overlay=prod" >> "$GITHUB_OUTPUT"
+            echo "namespace=demo-devops" >> "$GITHUB_OUTPUT"
           else
-            echo "overlay=dev"         >> "$GITHUB_OUTPUT"
+            echo "overlay=dev" >> "$GITHUB_OUTPUT"
             echo "namespace=demo-devops-dev" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Write and launch deploy script on EC2
         id: ssm_write
         env:
-          IMG:         ${{ needs.build-push.outputs.sha_tag }}
-          OVERLAY:     ${{ steps.env.outputs.overlay }}
-          NS:          ${{ steps.env.outputs.namespace }}
-          BRANCH:      ${{ github.ref_name }}
+          IMG: ${{ needs.build-push.outputs.sha_tag }}
+          OVERLAY: ${{ steps.env.outputs.overlay }}
+          NS: ${{ steps.env.outputs.namespace }}
+          BRANCH: ${{ github.ref_name }}
           INSTANCE_ID: ${{ steps.ec2.outputs.instance_id }}
-          GH_OWNER:    ${{ github.repository_owner }}
-          GH_REPO:     ${{ github.event.repository.name }}
+          GH_OWNER: ${{ github.repository_owner }}
+          GH_REPO: ${{ github.event.repository.name }}
         run: |
-          # Write deploy script to EC2 and launch via nohup — returns immediately,
-          # avoiding SSM IPC timeout on long-running ops on t3.micro.
+          # Heredoc EXTERNO sin comillas: expande ${IMG}, ${OVERLAY}, ${NS},
+          # ${BRANCH}, ${GH_OWNER}, ${GH_REPO} en el runner.
+          # \$? y \$! se evalúan en EC2 (NO en el runner).
           LAUNCH=$(cat <<LAUNCH_EOF
+          set -e
           rm -f /tmp/k8s-deploy.exit /tmp/k8s-deploy.log
-          cat > /tmp/k8s-deploy.sh << 'DEPLOY_EOF'
+          # Heredoc INTERNO sin comillas: las variables ya vienen sustituidas
+          # del runner, así que el script se escribe limpio en EC2.
+          cat > /tmp/k8s-deploy.sh <<DEPLOY_EOF
+          #!/usr/bin/env bash
           set -euxo pipefail
           if [ ! -d /opt/devsu/repo ]; then
             mkdir -p /opt/devsu
             git clone --depth 5 https://github.com/${GH_OWNER}/${GH_REPO}.git /opt/devsu/repo
           fi
           cd /opt/devsu/repo
-          git fetch origin ${BRANCH} && git reset --hard FETCH_HEAD
+          git fetch origin ${BRANCH}
+          git reset --hard FETCH_HEAD
           cd k8s/overlays/${OVERLAY}
           /usr/local/bin/kustomize edit set image devsu-devops-nodejs=${IMG}
           cd /opt/devsu/repo
           for i in \$(seq 1 60); do
-            kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes 2>/dev/null | grep -q Ready && break
+            if kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes 2>/dev/null | grep -q ' Ready '; then
+              break
+            fi
             echo "[\$i/60] waiting for k3s..."
-            [ \$i -eq 60 ] && exit 1
+            if [ "\$i" -eq 60 ]; then exit 1; fi
             sleep 10
           done
-          /usr/local/bin/kustomize build k8s/overlays/${OVERLAY} | kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml apply --validate=false -f -
-          kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml -n ${NS} rollout status deployment/demo-devops --timeout=300s
+          /usr/local/bin/kustomize build k8s/overlays/${OVERLAY} \
+            | kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml apply --validate=false -f -
+          kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml -n ${NS} \
+            rollout status deployment/demo-devops --timeout=300s
           DEPLOY_EOF
           chmod +x /tmp/k8s-deploy.sh
-          nohup bash -c 'bash /tmp/k8s-deploy.sh > /tmp/k8s-deploy.log 2>&1; echo $? > /tmp/k8s-deploy.exit' &
-          echo "Deploy launched PID $!"
+
+          # ─── Detach REAL del SSM Agent ───
+          # systemd-run lanza el deploy como unit hijo de systemd: no hereda
+          # los descriptores del agente, así que SSM cierra la sesión inmediato.
+          # Fallback: doble-fork con setsid + todos los fds a /dev/null.
+          if command -v systemd-run >/dev/null 2>&1; then
+            sudo systemd-run --unit=k8s-deploy-\$\$ --quiet --collect \
+              /bin/bash -c 'bash /tmp/k8s-deploy.sh > /tmp/k8s-deploy.log 2>&1; echo \$? > /tmp/k8s-deploy.exit'
+          else
+            ( setsid bash -c 'bash /tmp/k8s-deploy.sh > /tmp/k8s-deploy.log 2>&1; echo \$? > /tmp/k8s-deploy.exit' </dev/null >/dev/null 2>&1 & )
+          fi
+          echo "Deploy script written and unit launched"
           LAUNCH_EOF
           )
 
-          PARAMS=$(jq -n --arg s "$LAUNCH" '{"commands":[$s],"executionTimeout":["30"]}')
+          PARAMS=$(jq -n --arg s "$LAUNCH" '{"commands":[$s],"executionTimeout":["60"]}')
           CMD_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
@@ -345,49 +365,68 @@ jobs:
           INSTANCE_ID: ${{ steps.ec2.outputs.instance_id }}
         run: |
           CMD_ID="${{ steps.ssm_write.outputs.command_id }}"
-          for i in $(seq 1 12); do
+          for i in $(seq 1 18); do
             STATUS=$(aws ssm get-command-invocation \
               --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
               --query 'Status' --output text 2>/dev/null || echo "Pending")
-            echo "[$i/12] Status: $STATUS"
+            echo "[$i/18] Status: $STATUS"
             case "$STATUS" in
-              Success) echo "Deploy script launched OK"; break ;;
+              Success) echo "Deploy script launched OK"; exit 0 ;;
               Failed|Cancelled|TimedOut)
-                aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID"
+                aws ssm get-command-invocation \
+                  --command-id "$CMD_ID" --instance-id "$INSTANCE_ID"
                 exit 1 ;;
             esac
-            sleep 10
+            sleep 5
           done
+          echo "::error::Launch step did not reach Success in time"
+          exit 1
 
       - name: Poll deploy result (short SSM calls, no IPC timeout)
         env:
           INSTANCE_ID: ${{ steps.ec2.outputs.instance_id }}
         run: |
-          for i in $(seq 1 30); do
-            echo "[$i/30] Polling deploy status..."
+          for i in $(seq 1 60); do
+            echo "[$i/60] Polling deploy status..."
             CMD_ID=$(aws ssm send-command \
               --instance-ids "$INSTANCE_ID" \
               --document-name "AWS-RunShellScript" \
               --parameters '{"commands":["[ -f /tmp/k8s-deploy.exit ] && echo DONE:$(cat /tmp/k8s-deploy.exit) || echo RUNNING"],"executionTimeout":["10"]}' \
               --output text --query 'Command.CommandId')
-            sleep 20
+            # Esperar a que la invocación termine antes de leerla
+            aws ssm wait command-executed \
+              --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" 2>/dev/null || true
             RESULT=$(aws ssm get-command-invocation \
               --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
               --query 'StandardOutputContent' --output text 2>/dev/null || echo "RUNNING")
             echo "Result: $RESULT"
             if echo "$RESULT" | grep -q "DONE:0"; then
               echo "::notice::Deploy succeeded"
+              # Imprimir últimas 30 líneas del log para auditoría
+              LOG_CMD=$(aws ssm send-command \
+                --instance-ids "$INSTANCE_ID" \
+                --document-name "AWS-RunShellScript" \
+                --parameters '{"commands":["tail -30 /tmp/k8s-deploy.log"]}' \
+                --output text --query 'Command.CommandId')
+              sleep 5
+              aws ssm get-command-invocation \
+                --command-id "$LOG_CMD" --instance-id "$INSTANCE_ID" \
+                --query 'StandardOutputContent' --output text || true
               exit 0
             elif echo "$RESULT" | grep -q "DONE:"; then
               echo "::error::Deploy failed — fetching log"
-              aws ssm send-command \
+              LOG_CMD=$(aws ssm send-command \
                 --instance-ids "$INSTANCE_ID" \
                 --document-name "AWS-RunShellScript" \
-                --parameters '{"commands":["tail -50 /tmp/k8s-deploy.log"]}' \
-                --output text --query 'Command.CommandId'
+                --parameters '{"commands":["tail -80 /tmp/k8s-deploy.log"]}' \
+                --output text --query 'Command.CommandId')
+              sleep 5
+              aws ssm get-command-invocation \
+                --command-id "$LOG_CMD" --instance-id "$INSTANCE_ID" \
+                --query 'StandardOutputContent' --output text || true
               exit 1
             fi
-            sleep 10
+            sleep 15
           done
-          echo "::error::Timeout waiting for deploy"
+          echo "::error::Timeout esperando deploy (15 min)"
           exit 1
