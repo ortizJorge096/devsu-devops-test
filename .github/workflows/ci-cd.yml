@@ -7,7 +7,6 @@ on:
     branches: [main, develop]
   workflow_dispatch: {}
 
-# Minimal default permissions; each job widens what it needs.
 permissions:
   contents: read
 
@@ -106,7 +105,7 @@ jobs:
     needs: [test, sast]
     permissions:
       contents: read
-      id-token: write  # required to fetch the OIDC JWT
+      id-token: write
     outputs:
       image: ${{ steps.tags.outputs.image }}
       digest: ${{ steps.build.outputs.digest }}
@@ -161,7 +160,7 @@ jobs:
             org.opencontainers.image.licenses=MIT
 
   # ───────────────────────────────────────────────────────────────────────
-  # 5) Vulnerability scan with Trivy (against the pushed ECR image)
+  # 5) Vulnerability scan with Trivy
   # ───────────────────────────────────────────────────────────────────────
   image-scan:
     name: Vulnerability Scan (Trivy)
@@ -196,7 +195,7 @@ jobs:
           sarif_file: trivy.sarif
 
   # ───────────────────────────────────────────────────────────────────────
-  # 6) Validate K8s manifests (kubeconform + kustomize build)
+  # 6) Validate K8s manifests
   # ───────────────────────────────────────────────────────────────────────
   validate-k8s:
     name: Validate K8s Manifests
@@ -225,19 +224,18 @@ jobs:
             out/local.yaml out/dev.yaml out/prod.yaml
 
   # ───────────────────────────────────────────────────────────────────────
-  # 7) Deploy to k3s on EC2 via SSM Send-Command
+  # 7) Deploy a k3s — self-hosted runner en el propio EC2
   #
-  # Branch → Environment mapping (configured in GitHub UI per environment):
-  #   - main    → production (manual approval recommended)
-  #   - develop → dev
-  #
-  # No SSH: uses AWS Systems Manager (SSM) Send-Command. The IAM role assumed
-  # via OIDC has ssm:SendCommand + GetCommandInvocation scoped to the project's
-  # EC2 instance (provisioned by terraform/modules/github-oidc).
+  # El runner corre dentro del EC2 que aloja k3s. kubectl es directo,
+  # sin SSM, sin OIDC, sin credenciales AWS: el kubeconfig local
+  # (/home/ghrunner/.kube/config, copiado de /etc/rancher/k3s/k3s.yaml en
+  # user-data) tiene cluster-admin sobre el k3s local. Containerd ya está
+  # autenticado a ECR vía amazon-ecr-credential-helper + el instance
+  # profile, así que el pull de la imagen funciona sin imagePullSecrets.
   # ───────────────────────────────────────────────────────────────────────
   deploy:
-    name: Deploy to k3s (SSM)
-    runs-on: ubuntu-latest
+    name: Deploy to k3s (self-hosted)
+    runs-on: [self-hosted, k3s-deploy]
     needs: [build-push, image-scan, validate-k8s]
     if: |
       (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
@@ -249,184 +247,53 @@ jobs:
 
     permissions:
       contents: read
-      id-token: write  # OIDC to assume the AWS role
+
     steps:
       - uses: actions/checkout@v4
-
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Find target EC2 instance by tag
-        id: ec2
-        run: |
-          # The ec2-k3s module tags the instance with Component=runtime + Project=devsu-devops-test.
-          INSTANCE_ID=$(aws ec2 describe-instances \
-            --filters \
-              "Name=tag:Component,Values=runtime" \
-              "Name=tag:Project,Values=devsu-devops-test" \
-              "Name=instance-state-name,Values=running" \
-            --query 'Reservations[0].Instances[0].InstanceId' --output text)
-          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
-            echo "::error::No EC2 instance found with Component=runtime"
-            exit 1
-          fi
-          echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
-          echo "Found EC2: $INSTANCE_ID"
 
       - name: Resolve environment overlay
         id: env
         run: |
-          # Branch → overlay + namespace mapping.
-          #   main    → prod overlay (namespace: demo-devops)
-          #   develop → dev  overlay (namespace: demo-devops-dev)
           if [ '${{ github.ref_name }}' = 'main' ]; then
-            echo "overlay=prod" >> "$GITHUB_OUTPUT"
-            echo "namespace=demo-devops" >> "$GITHUB_OUTPUT"
+            echo "overlay=prod"            >> "$GITHUB_OUTPUT"
+            echo "namespace=demo-devops"   >> "$GITHUB_OUTPUT"
           else
-            echo "overlay=dev" >> "$GITHUB_OUTPUT"
-            echo "namespace=demo-devops-dev" >> "$GITHUB_OUTPUT"
+            echo "overlay=dev"                  >> "$GITHUB_OUTPUT"
+            echo "namespace=demo-devops-dev"    >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Write and launch deploy script on EC2
-        id: ssm_write
+      - name: Install kustomize (si no está)
+        run: |
+          if ! command -v kustomize >/dev/null 2>&1; then
+            curl -sSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz" \
+              | sudo tar -xz -C /usr/local/bin
+          fi
+          kustomize version
+
+      - name: Set image tag and apply
         env:
           IMG: ${{ needs.build-push.outputs.sha_tag }}
           OVERLAY: ${{ steps.env.outputs.overlay }}
           NS: ${{ steps.env.outputs.namespace }}
-          BRANCH: ${{ github.ref_name }}
-          INSTANCE_ID: ${{ steps.ec2.outputs.instance_id }}
-          GH_OWNER: ${{ github.repository_owner }}
-          GH_REPO: ${{ github.event.repository.name }}
         run: |
-          # Heredoc EXTERNO sin comillas: expande ${IMG}, ${OVERLAY}, ${NS},
-          # ${BRANCH}, ${GH_OWNER}, ${GH_REPO} en el runner.
-          # \$? y \$! se evalúan en EC2 (NO en el runner).
-          LAUNCH=$(cat <<LAUNCH_EOF
-          set -e
-          rm -f /tmp/k8s-deploy.exit /tmp/k8s-deploy.log
-          # Heredoc INTERNO sin comillas: las variables ya vienen sustituidas
-          # del runner, así que el script se escribe limpio en EC2.
-          cat > /tmp/k8s-deploy.sh <<DEPLOY_EOF
-          #!/usr/bin/env bash
           set -euxo pipefail
-          if [ ! -d /opt/devsu/repo ]; then
-            mkdir -p /opt/devsu
-            git clone --depth 5 https://github.com/${GH_OWNER}/${GH_REPO}.git /opt/devsu/repo
-          fi
-          cd /opt/devsu/repo
-          git fetch origin ${BRANCH}
-          git reset --hard FETCH_HEAD
-          cd k8s/overlays/${OVERLAY}
-          /usr/local/bin/kustomize edit set image devsu-devops-nodejs=${IMG}
-          cd /opt/devsu/repo
-          for i in \$(seq 1 60); do
-            if kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes 2>/dev/null | grep -q ' Ready '; then
-              break
-            fi
-            echo "[\$i/60] waiting for k3s..."
-            if [ "\$i" -eq 60 ]; then exit 1; fi
-            sleep 10
-          done
-          /usr/local/bin/kustomize build k8s/overlays/${OVERLAY} \
-            | kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml apply --validate=false -f -
-          kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml -n ${NS} \
-            rollout status deployment/demo-devops --timeout=300s
-          DEPLOY_EOF
-          chmod +x /tmp/k8s-deploy.sh
+          cd k8s/overlays/"$OVERLAY"
+          kustomize edit set image devsu-devops-nodejs="$IMG"
+          cd "$GITHUB_WORKSPACE"
 
-          # ─── Detach REAL del SSM Agent ───
-          # systemd-run lanza el deploy como unit hijo de systemd: no hereda
-          # los descriptores del agente, así que SSM cierra la sesión inmediato.
-          # Fallback: doble-fork con setsid + todos los fds a /dev/null.
-          if command -v systemd-run >/dev/null 2>&1; then
-            sudo systemd-run --unit=k8s-deploy-\$\$ --quiet --collect \
-              /bin/bash -c 'bash /tmp/k8s-deploy.sh > /tmp/k8s-deploy.log 2>&1; echo \$? > /tmp/k8s-deploy.exit'
-          else
-            ( setsid bash -c 'bash /tmp/k8s-deploy.sh > /tmp/k8s-deploy.log 2>&1; echo \$? > /tmp/k8s-deploy.exit' </dev/null >/dev/null 2>&1 & )
-          fi
-          echo "Deploy script written and unit launched"
-          LAUNCH_EOF
-          )
+          kustomize build k8s/overlays/"$OVERLAY" | kubectl apply -f -
+          kubectl -n "$NS" rollout status deployment/demo-devops --timeout=300s
 
-          PARAMS=$(jq -n --arg s "$LAUNCH" '{"commands":[$s],"executionTimeout":["60"]}')
-          CMD_ID=$(aws ssm send-command \
-            --instance-ids "$INSTANCE_ID" \
-            --document-name "AWS-RunShellScript" \
-            --comment "Launch deploy" \
-            --parameters "$PARAMS" \
-            --output text --query 'Command.CommandId')
-          echo "command_id=$CMD_ID" >> "$GITHUB_OUTPUT"
-
-      - name: Confirm deploy script launched
+      - name: Print cluster state (auditoría)
+        if: always()
         env:
-          INSTANCE_ID: ${{ steps.ec2.outputs.instance_id }}
+          NS: ${{ steps.env.outputs.namespace }}
         run: |
-          CMD_ID="${{ steps.ssm_write.outputs.command_id }}"
-          for i in $(seq 1 18); do
-            STATUS=$(aws ssm get-command-invocation \
-              --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
-              --query 'Status' --output text 2>/dev/null || echo "Pending")
-            echo "[$i/18] Status: $STATUS"
-            case "$STATUS" in
-              Success) echo "Deploy script launched OK"; exit 0 ;;
-              Failed|Cancelled|TimedOut)
-                aws ssm get-command-invocation \
-                  --command-id "$CMD_ID" --instance-id "$INSTANCE_ID"
-                exit 1 ;;
-            esac
-            sleep 5
-          done
-          echo "::error::Launch step did not reach Success in time"
-          exit 1
-
-      - name: Poll deploy result (short SSM calls, no IPC timeout)
-        env:
-          INSTANCE_ID: ${{ steps.ec2.outputs.instance_id }}
-        run: |
-          for i in $(seq 1 60); do
-            echo "[$i/60] Polling deploy status..."
-            CMD_ID=$(aws ssm send-command \
-              --instance-ids "$INSTANCE_ID" \
-              --document-name "AWS-RunShellScript" \
-              --parameters '{"commands":["[ -f /tmp/k8s-deploy.exit ] && echo DONE:$(cat /tmp/k8s-deploy.exit) || echo RUNNING"],"executionTimeout":["10"]}' \
-              --output text --query 'Command.CommandId')
-            # Esperar a que la invocación termine antes de leerla
-            aws ssm wait command-executed \
-              --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" 2>/dev/null || true
-            RESULT=$(aws ssm get-command-invocation \
-              --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
-              --query 'StandardOutputContent' --output text 2>/dev/null || echo "RUNNING")
-            echo "Result: $RESULT"
-            if echo "$RESULT" | grep -q "DONE:0"; then
-              echo "::notice::Deploy succeeded"
-              # Imprimir últimas 30 líneas del log para auditoría
-              LOG_CMD=$(aws ssm send-command \
-                --instance-ids "$INSTANCE_ID" \
-                --document-name "AWS-RunShellScript" \
-                --parameters '{"commands":["tail -30 /tmp/k8s-deploy.log"]}' \
-                --output text --query 'Command.CommandId')
-              sleep 5
-              aws ssm get-command-invocation \
-                --command-id "$LOG_CMD" --instance-id "$INSTANCE_ID" \
-                --query 'StandardOutputContent' --output text || true
-              exit 0
-            elif echo "$RESULT" | grep -q "DONE:"; then
-              echo "::error::Deploy failed — fetching log"
-              LOG_CMD=$(aws ssm send-command \
-                --instance-ids "$INSTANCE_ID" \
-                --document-name "AWS-RunShellScript" \
-                --parameters '{"commands":["tail -80 /tmp/k8s-deploy.log"]}' \
-                --output text --query 'Command.CommandId')
-              sleep 5
-              aws ssm get-command-invocation \
-                --command-id "$LOG_CMD" --instance-id "$INSTANCE_ID" \
-                --query 'StandardOutputContent' --output text || true
-              exit 1
-            fi
-            sleep 15
-          done
-          echo "::error::Timeout esperando deploy (15 min)"
-          exit 1
+          echo "── Pods ──"
+          kubectl -n "$NS" get pods -o wide
+          echo "── Services ──"
+          kubectl -n "$NS" get svc
+          echo "── Ingress ──"
+          kubectl -n "$NS" get ingress
+          echo "── HPA ──"
+          kubectl -n "$NS" get hpa || true

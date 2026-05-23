@@ -52,6 +52,7 @@ module "k3s" {
 
   github_owner = var.github_owner
   github_repo  = var.github_repo
+  github_token = var.github_token   # registra self-hosted runner en boot
 
   # Default to "<ecr_repo>:latest" if no specific tag was passed in.
   image_ref               = var.image_ref != "" ? var.image_ref : "${module.ecr.repository_url}:latest"
@@ -68,7 +69,7 @@ module "k3s" {
 }
 
 module "monitoring" {
-  count  = var.enable_ec2_k3s ? 1 : 0
+  count  = (var.enable_ec2_k3s && var.enable_monitoring) ? 1 : 0
   source = "../../modules/monitoring"
 
   name        = var.name_prefix

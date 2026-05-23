@@ -128,6 +128,9 @@ locals {
     aws_region              = var.aws_region
     public_host             = var.public_host
     enable_cloudwatch_agent = var.cloudwatch_agent_config
+    github_token            = var.github_token
+    runner_labels           = var.runner_labels
+    runner_version          = var.runner_version
   })
 }
 

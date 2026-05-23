@@ -17,7 +17,7 @@ variable "subnet_id" {
 variable "instance_type" {
   description = "EC2 instance type. t3.micro / t2.micro are AWS Free Tier eligible."
   type        = string
-  default     = "t3.micro"
+  default     = "t3.small"
 }
 
 variable "image_ref" {
@@ -57,4 +57,24 @@ variable "tags" {
   description = "Extra tags."
   type        = map(string)
   default     = {}
+}
+
+# ─── Self-hosted GitHub Actions runner ────────────────────────────────────
+variable "github_token" {
+  description = "PAT fine-grained con Administration: read+write sobre el repo (o classic con scope `repo`). Sólo se usa en user-data para obtener un registration-token efímero. Dejar vacío omite la instalación del runner."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "runner_labels" {
+  description = "Labels del self-hosted runner. El workflow apunta a `k3s-deploy`."
+  type        = string
+  default     = "self-hosted,linux,x64,k3s-deploy"
+}
+
+variable "runner_version" {
+  description = "Versión del actions/runner a instalar."
+  type        = string
+  default     = "2.319.1"
 }

@@ -47,8 +47,22 @@ variable "alarm_email" {
   default     = ""
 }
 
+variable "enable_monitoring" {
+  description = "Create the monitoring module (CloudWatch alarms + SNS). Apaga para ahorrar RAM en t3.micro o si no quieres recibir alertas."
+  type        = bool
+  default     = true
+}
+
 variable "allowed_environments" {
   description = "GitHub Environments allowed to assume the role via OIDC (deploy job)."
   type        = list(string)
   default     = ["dev", "production"]
+}
+
+# ─── Self-hosted GitHub Actions runner ────────────────────────────────────
+variable "github_token" {
+  description = "PAT fine-grained con Administration: read+write sobre el repo. Se inyecta en user-data del EC2 para registrar el self-hosted runner usado por el job `deploy` del workflow. Dejar vacío omite la instalación (el cluster funciona, pero el deploy del CI/CD fallará por falta de runner)."
+  type        = string
+  default     = ""
+  sensitive   = true
 }

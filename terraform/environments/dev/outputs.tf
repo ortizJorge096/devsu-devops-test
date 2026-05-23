@@ -45,10 +45,10 @@ output "ssm_session_command" {
 
 output "monitoring_sns_topic_arn" {
   description = "SNS topic that receives CloudWatch alarm notifications."
-  value       = var.enable_ec2_k3s ? module.monitoring[0].sns_topic_arn : null
+  value       = (var.enable_ec2_k3s && var.enable_monitoring) ? module.monitoring[0].sns_topic_arn : null
 }
 
 output "monitoring_alarms" {
   description = "Names of the CloudWatch alarms created."
-  value       = var.enable_ec2_k3s ? module.monitoring[0].alarm_names : []
+  value       = (var.enable_ec2_k3s && var.enable_monitoring) ? module.monitoring[0].alarm_names : []
 }
