@@ -42,6 +42,7 @@ module "github_oidc" {
 module "k3s" {
   count  = var.enable_ec2_k3s ? 1 : 0
   source = "../../modules/ec2-k3s"
+  runner_labels = var.runner_labels
 
   name          = "${var.name_prefix}-k3s"
   instance_type = var.instance_type
@@ -71,6 +72,7 @@ module "k3s" {
   enable_letsencrypt = var.enable_letsencrypt
   letsencrypt_email  = coalesce(var.letsencrypt_email != "" ? var.letsencrypt_email : null, var.alarm_email != "" ? var.alarm_email : null, "devops-notify@example.com")
 
+  
   # Tags used by the CI pipeline to locate the instance via SSM (filters by
   # Component=runtime AND Project=<repo-name>).
   tags = {

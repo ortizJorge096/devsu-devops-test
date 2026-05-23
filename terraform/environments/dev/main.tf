@@ -42,6 +42,7 @@ module "github_oidc" {
 module "k3s" {
   count  = var.enable_ec2_k3s ? 1 : 0
   source = "../../modules/ec2-k3s"
+  runner_labels = var.runner_labels
 
   name          = "${var.name_prefix}-k3s"
   instance_type = var.instance_type
