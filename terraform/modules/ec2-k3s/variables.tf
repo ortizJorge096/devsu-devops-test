@@ -17,7 +17,7 @@ variable "subnet_id" {
 variable "instance_type" {
   description = "EC2 instance type. t3.micro / t2.micro are AWS Free Tier eligible."
   type        = string
-  default     = "t3.small"
+  default     = "t3.micro"
 }
 
 variable "image_ref" {
