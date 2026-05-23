@@ -47,6 +47,22 @@ variable "github_repo" {
   type        = string
 }
 
+# ─── Multi-environment knobs ──────────────────────────────────────────────
+# These two control what gets cloned + applied at first boot. Defaults match
+# the "production" environment (main branch, prod overlay) so the module is
+# safe to call without overrides. The `dev` environment overrides both.
+variable "git_branch" {
+  description = "Git branch to clone in userdata for the initial bootstrap apply (e.g. `main` for prod, `develop` for dev). The self-hosted runner takes over for subsequent deploys, so this only affects the first apply done by cloud-init."
+  type        = string
+  default     = "main"
+}
+
+variable "kustomize_overlay" {
+  description = "Kustomize overlay under `k8s/overlays/` to apply at first boot (e.g. `prod`, `dev`). Must exist in the cloned repo at the branch above."
+  type        = string
+  default     = "prod"
+}
+
 variable "cloudwatch_agent_config" {
   description = "Whether to install + configure CloudWatch Agent for memory/disk metrics."
   type        = bool

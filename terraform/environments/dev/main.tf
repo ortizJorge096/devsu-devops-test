@@ -54,6 +54,11 @@ module "k3s" {
   github_repo  = var.github_repo
   github_token = var.github_token   # registra self-hosted runner en boot
 
+  # Multi-environment: this environment tracks `develop` and applies the
+  # `dev` overlay at first boot. Override via terraform.tfvars if needed.
+  git_branch        = var.git_branch
+  kustomize_overlay = var.kustomize_overlay
+
   # Default to "<ecr_repo>:latest" if no specific tag was passed in.
   image_ref               = var.image_ref != "" ? var.image_ref : "${module.ecr.repository_url}:latest"
   aws_region              = var.region

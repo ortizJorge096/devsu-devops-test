@@ -26,3 +26,10 @@ alarm_email = ""
 
 # GitHub Environments that the deploy job runs under (sub claim changes when environment: is set).
 allowed_environments = ["dev", "production"]
+
+# What the k3s node clones + applies on first boot. The `dev` environment
+# defaults to `develop` + `dev` so the cluster comes up wired to the
+# `demo-devops-dev` namespace. Override here if you want to bootstrap from
+# `main` (e.g. promoting this stack to prod without renaming the workspace).
+# git_branch        = "develop"
+# kustomize_overlay = "dev"

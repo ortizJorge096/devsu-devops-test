@@ -24,7 +24,23 @@ variable "github_repo" {
 variable "allowed_branches" {
   description = "Branches allowed to assume the AWS role via OIDC."
   type        = list(string)
-  default     = ["main"]
+  default     = ["main", "develop"]
+}
+
+# ─── Multi-environment knobs ──────────────────────────────────────────────
+# The dev environment tracks the `develop` branch and applies the `dev`
+# overlay at first boot. A future `prod` environment would override these
+# back to `main` / `prod`.
+variable "git_branch" {
+  description = "Branch cloned by the k3s user-data on first boot. The dev environment defaults to `develop`."
+  type        = string
+  default     = "develop"
+}
+
+variable "kustomize_overlay" {
+  description = "Kustomize overlay applied by the k3s user-data on first boot. The dev environment defaults to `dev` (so the `demo-devops-dev` namespace is created)."
+  type        = string
+  default     = "dev"
 }
 
 # ─── EC2 / k3s ─────────────────────────────────────────────────────────────

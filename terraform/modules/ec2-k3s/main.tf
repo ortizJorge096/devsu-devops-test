@@ -124,6 +124,8 @@ locals {
   userdata = templatefile("${path.module}/userdata.sh.tftpl", {
     github_owner            = var.github_owner
     github_repo             = var.github_repo
+    git_branch              = var.git_branch
+    kustomize_overlay       = var.kustomize_overlay
     image_ref               = var.image_ref
     aws_region              = var.aws_region
     public_host             = var.public_host

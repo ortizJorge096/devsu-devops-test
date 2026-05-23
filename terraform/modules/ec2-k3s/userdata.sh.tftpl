@@ -7,7 +7,7 @@
 #   2) Install k3s (containerd-based, certified Kubernetes).
 #   3) Configure containerd to pull from ECR via the EC2 instance profile.
 #   4) (Optional) Install CloudWatch Agent for memory/disk metrics.
-#   5) Clone the GitHub repo and apply the prod overlay.
+#   5) Clone the GitHub repo at ${git_branch} and apply the ${kustomize_overlay} overlay.
 set -euxo pipefail
 exec > /var/log/userdata.log 2>&1
 
@@ -117,22 +117,34 @@ curl -sSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustom
 
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
-# ─── Deploy the app from the repo's prod overlay ──────────────────────────
+# ─── Deploy the app from the repo's ${kustomize_overlay} overlay ──────────
+# The branch and overlay are environment-specific:
+#   - dev environment  → branch=develop, overlay=dev
+#   - prod environment → branch=main,    overlay=prod
+# After this first-boot apply, the self-hosted runner installed below takes
+# over and the CI/CD workflow's `deploy` job handles subsequent rollouts.
 mkdir -p /opt/devsu
 cd /opt/devsu
-git clone --depth 1 https://github.com/${github_owner}/${github_repo}.git repo
+git clone --depth 1 --branch "${git_branch}" \
+  https://github.com/${github_owner}/${github_repo}.git repo
 cd repo
 
-sed -i "s|demo-devops.example.com|${public_host}|g" k8s/overlays/prod/kustomization.yaml || true
+OVERLAY_DIR="k8s/overlays/${kustomize_overlay}"
+sed -i "s|demo-devops.example.com|${public_host}|g" "$${OVERLAY_DIR}/kustomization.yaml" || true
 
-cd k8s/overlays/prod
+cd "$${OVERLAY_DIR}"
 kustomize edit set image devsu-devops-nodejs=${image_ref}
 cd /opt/devsu/repo
 
-kustomize build k8s/overlays/prod | kubectl --kubeconfig $${KUBECONFIG} apply -f -
+# Resolve target namespace from the overlay so we can wait on the right rollout.
+APP_NS=$(kustomize build "$${OVERLAY_DIR}" \
+  | awk '/^kind: Deployment$/{f=1} f && /^  namespace:/{print $2; exit}')
+APP_NS="$${APP_NS:-demo-devops}"
 
-kubectl --kubeconfig $${KUBECONFIG} -n demo-devops rollout status deployment/demo-devops --timeout=300s || true
-kubectl --kubeconfig $${KUBECONFIG} -n demo-devops get pods,svc,ingress
+kustomize build "$${OVERLAY_DIR}" | kubectl --kubeconfig $${KUBECONFIG} apply -f -
+
+kubectl --kubeconfig $${KUBECONFIG} -n "$${APP_NS}" rollout status deployment/demo-devops --timeout=300s || true
+kubectl --kubeconfig $${KUBECONFIG} -n "$${APP_NS}" get pods,svc,ingress
 
 # ─── GitHub Actions self-hosted runner ────────────────────────────────────
 # Registra este EC2 como runner del repositorio. El job `deploy` del workflow
