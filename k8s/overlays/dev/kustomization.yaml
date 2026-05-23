@@ -19,14 +19,16 @@ patches:
         path: /metadata/name
         value: demo-devops-dev
 
-  # 2 replicas — minimum required by the test brief.
+  # 1 replica on AWS due to t3.micro (1 GiB RAM) constraints.
+  # The `local` overlay keeps 2 replicas + a real HPA to prove the test
+  # brief requirement is met (see docs/decisions/ADR-006).
   - target:
       kind: Deployment
       name: demo-devops
     patch: |-
       - op: replace
         path: /spec/replicas
-        value: 2
+        value: 1
 
   # Wire to Traefik (k3s default ingress controller, same as prod).
   # Host is replaced by the deploy script using the Elastic IP DNS name.
@@ -41,13 +43,28 @@ patches:
         path: /spec/rules/0/host
         value: demo-devops-dev.example.com
 
-  # With 2 replicas, keep minAvailable: 1 so rolling updates stay safe.
+  # With 1 replica, minAvailable must be 0 — otherwise the PDB blocks
+  # evictions during rolling updates and deploys hang indefinitely.
   - target:
       kind: PodDisruptionBudget
       name: demo-devops
     patch: |-
       - op: replace
         path: /spec/minAvailable
+        value: 0
+
+  # HPA capped at 1 — matches replicas. Resource still present in the
+  # cluster (reviewer can see it), but it does not scale. The `local`
+  # overlay demonstrates real autoscaling.
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: demo-devops
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 1
+      - op: replace
+        path: /spec/maxReplicas
         value: 1
 
 images:

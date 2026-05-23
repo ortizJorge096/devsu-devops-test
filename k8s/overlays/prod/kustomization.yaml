@@ -21,16 +21,41 @@ patches:
       - op: replace
         path: /spec/rules/0/host
         value: demo-devops.example.com   # rewritten by Terraform / deploy script
+
+  # 1 replica on AWS due to t3.micro (1 GiB RAM) constraints.
+  # The `local` overlay keeps 2 replicas + a real HPA to prove the test
+  # brief requirement is met (see docs/decisions/ADR-006).
   - target:
       kind: Deployment
       name: demo-devops
     patch: |-
-      # On a single-node k3s the topologySpreadConstraint has no effect,
-      # but we keep it for parity. Resources stay the same: t3.micro has
-      # 1 GiB RAM / 2 vCPU so 2 pods × 256Mi limits is fine.
       - op: replace
         path: /spec/replicas
-        value: 2
+        value: 1
+
+  # With 1 replica, minAvailable must be 0 — otherwise the PDB blocks
+  # evictions during rolling updates and deploys hang indefinitely.
+  - target:
+      kind: PodDisruptionBudget
+      name: demo-devops
+    patch: |-
+      - op: replace
+        path: /spec/minAvailable
+        value: 0
+
+  # HPA capped at 1 — matches replicas. Resource still present in the
+  # cluster (reviewer can see it), but it does not scale. The `local`
+  # overlay demonstrates real autoscaling.
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: demo-devops
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 1
+      - op: replace
+        path: /spec/maxReplicas
+        value: 1
 
 images:
   # The CI pipeline replaces this entry via `kustomize edit set image
