@@ -14,7 +14,7 @@ metadata:
 spec:
   # ingressClassName is supplied by the overlay (local: nginx, prod: traefik).
   rules:
-    - host: demo-devops.54.84.139.24.nip.io
+    - host: demo-devops.local
       http:
         paths:
           - path: /
