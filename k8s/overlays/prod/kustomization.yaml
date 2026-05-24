@@ -32,40 +32,42 @@ patches:
       kind: Ingress
       name: demo-devops
 
-  # 1 replica on AWS due to t3.micro (1 GiB RAM) constraints.
-  # The `local` overlay keeps 2 replicas + a real HPA to prove the test
-  # brief requirement is met (see docs/decisions/ADR-006).
+  # 2 replicas on AWS — t3.medium (4 GiB RAM) has the headroom that the
+  # original t3.micro did not. Matches the brief's "≥ 2 replicas" rule on
+  # the prod path too, not only on dev/local. See docs/decisions/ADR-006
+  # for the historical context (it documents the older t3.micro trade-off).
   - target:
       kind: Deployment
       name: demo-devops
     patch: |-
       - op: replace
         path: /spec/replicas
-        value: 1
+        value: 2
 
-  # With 1 replica, minAvailable must be 0 — otherwise the PDB blocks
-  # evictions during rolling updates and deploys hang indefinitely.
+  # With 2 replicas, minAvailable: 1 keeps at least one pod serving
+  # traffic during voluntary disruptions (node drain, rolling update)
+  # without blocking evictions (which `minAvailable: 2` would do).
   - target:
       kind: PodDisruptionBudget
       name: demo-devops
     patch: |-
       - op: replace
         path: /spec/minAvailable
-        value: 0
+        value: 1
 
-  # HPA capped at 1 — matches replicas. Resource still present in the
-  # cluster (reviewer can see it), but it does not scale. The `local`
-  # overlay demonstrates real autoscaling.
+  # HPA scaled 2..3 — same envelope as the dev overlay. Conservative cap
+  # on t3.medium to leave headroom for k3s control plane + self-hosted
+  # runner (see ADR-006's RAM budget table and ADR-007).
   - target:
       kind: HorizontalPodAutoscaler
       name: demo-devops
     patch: |-
       - op: replace
         path: /spec/minReplicas
-        value: 1
+        value: 2
       - op: replace
         path: /spec/maxReplicas
-        value: 1
+        value: 3
 
 images:
   # The CI pipeline replaces this entry via `kustomize edit set image
