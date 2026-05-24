@@ -575,14 +575,6 @@ subscription receives notifications.
 
 ---
 
-### 9.8 Where to look in the GitHub UI
-
-- **Workflow runs** → Actions tab → `CI/CD` workflow.
-- **Security findings (Trivy + njsscan SARIFs)** → Security tab → Code scanning.
-- **Environments and secrets** → Settings → Secrets and variables → Actions.
-
----
-
 ## 10. Troubleshooting
 
 | Symptom | Fix |
