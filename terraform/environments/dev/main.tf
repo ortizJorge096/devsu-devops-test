@@ -46,6 +46,8 @@ module "k3s" {
 
   name          = "${var.name_prefix}-k3s"
   instance_type = var.instance_type
+  spot_instance_types = var.spot_instance_types 
+
 
   vpc_id    = module.network.vpc_id
   subnet_id = module.network.public_subnet_ids[0]

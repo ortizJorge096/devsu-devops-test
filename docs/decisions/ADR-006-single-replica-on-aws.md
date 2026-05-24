@@ -1,7 +1,19 @@
 # ADR 006 — Replica strategy on AWS overlays (t3.micro RAM trade-off)
 
 ## Status
-Amended — 2026-05-23 (original: single replica → amended: 2 replicas on dev, 1 on prod)
+Amended (2) — 2026-05-24
+
+History:
+- **Original (2026-05-23)**: single replica on every AWS overlay,
+  motivated by `t3.micro` (1 GiB RAM) Free Tier constraints.
+- **Amendment 1 (2026-05-23)**: dev moved to 2 replicas + HPA 2..3 to
+  honor the brief on the AWS path; prod stayed at 1 replica due to the
+  same RAM ceiling.
+- **Amendment 2 (2026-05-24)**: prod also moved to 2 replicas + HPA
+  2..3, after both environments were upgraded from `t3.micro` to
+  `t3.medium` (4 GiB RAM). This executes "Migration path §1" of this
+  ADR — the RAM ceiling that justified single-replica prod is no
+  longer the binding constraint.
 
 ## Context
 The brief requires "**at least two replicas and horizontal scaling**" for the
@@ -53,10 +65,22 @@ into thrashing — the HPA cap on dev is therefore 3.
 
 ### `k8s/overlays/prod` (target: `main` branch, namespace `demo-devops`)
 
-Still `Deployment.replicas: 1`, `PDB.minAvailable: 0`, HPA capped at 1.
-Prod is the "demo / showcase" path — reviewers see the running endpoint —
-so we keep the lowest-risk configuration there until either the runner is
-moved off-box or the instance is resized.
+After Amendment 2: same shape as dev.
+
+- `Deployment.replicas: 2` — matches the brief's "≥ 2 replicas" rule on
+  the prod path too. No longer relies on dev/local as the canonical
+  evidence.
+- `PodDisruptionBudget.minAvailable: 1` — guarantees at least one pod
+  serving during voluntary disruptions (node drains, rolling updates).
+- `HorizontalPodAutoscaler.minReplicas: 2`, `maxReplicas: 3` — same
+  conservative envelope as dev. Cap stays at 3 to leave headroom for
+  the colocated runner (see ADR-007) and the k3s control plane on the
+  `t3.medium`; lifting it requires either moving the runner off-box or
+  bumping the instance size further (Migration path §3 below).
+
+The prior config (replicas: 1, PDB.minAvailable: 0, HPA 1..1) is
+preserved in git history (this file's revision pre-2026-05-24) for
+auditability of the original t3.micro-era trade-off.
 
 ### `k8s/overlays/local`
 
@@ -75,10 +99,13 @@ Pros
   with HPA on real metrics. Zero changes needed to that path.
 
 Cons
-- Dev sits closer to the t3.micro RAM ceiling; rare OOM scenarios are
-  possible if the runner, k3s, and a deploy hit peak at the same time.
-  Monitored by the `mem_used_percent` CloudWatch alarm at 85%.
-- Prod still has the single-replica caveat (brief 503 during pod restart).
+- The historical t3.micro RAM analysis (table above) is preserved for
+  context but no longer reflects the running infrastructure — both
+  environments are on `t3.medium`. The `mem_used_percent` CloudWatch
+  alarm at 85% still applies but fires much less often.
+- The HPA cap of 3 on both overlays is a documentation footnote rather
+  than a real ceiling; raising it requires either evidence of sustained
+  load above the current envelope or a re-cost of the t3.medium baseline.
 
 ## Migration path
 Two ways to "lift the cap" on AWS overlays:

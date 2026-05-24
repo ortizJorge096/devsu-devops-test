@@ -29,6 +29,7 @@ module "ecr" {
 
 module "github_oidc" {
   source = "../../modules/github-oidc"
+  create_oidc_provider = var.create_oidc_provider
 
   github_owner         = var.github_owner
   github_repo          = var.github_repo
@@ -46,6 +47,7 @@ module "k3s" {
 
   name          = "${var.name_prefix}-k3s"
   instance_type = var.instance_type
+  spot_instance_types = var.spot_instance_types 
 
   vpc_id    = module.network.vpc_id
   subnet_id = module.network.public_subnet_ids[0]

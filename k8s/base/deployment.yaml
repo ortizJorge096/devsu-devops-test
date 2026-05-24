@@ -28,9 +28,10 @@ spec:
         app.kubernetes.io/name: demo-devops
         app.kubernetes.io/component: api
       annotations:
-        # Forces a rollout when configmap/secret data changes
-        # (Kustomize hash suffixes would be more elegant; this is a
-        # belt-and-braces fallback for non-Kustomize plain-apply users).
+        # Explicitly opt out of Prometheus scraping — the app doesn't
+        # expose a /metrics endpoint, so a scraper that auto-discovers
+        # pods (e.g. Prometheus Operator with default ServiceMonitor
+        # selectors) would only generate noise here.
         prometheus.io/scrape: "false"
     spec:
       # Spread replicas across nodes when more than one node exists.

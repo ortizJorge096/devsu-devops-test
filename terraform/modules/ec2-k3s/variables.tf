@@ -25,11 +25,7 @@ variable "spot_instance_types" {
   description = "Instance types the ASG is allowed to launch as Spot. Diversifying across types reduces the chance that a single-pool capacity shortage drops the node (ADR-009)."
   type        = list(string)
   default = [
-    "t3.micro",
-    "t3a.micro",
-    "t2.micro",
-    "t3.small",
-    "t3a.small",
+    "t3.medium"
   ]
 }
 

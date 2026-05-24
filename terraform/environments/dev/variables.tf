@@ -89,6 +89,12 @@ variable "instance_type" {
   default     = "t3.micro"
 }
 
+variable "spot_instance_types" {
+  description = "Instance types the ASG is allowed to launch as Spot. Diversifying across types reduces the chance that a single-pool capacity shortage drops the node."
+  type        = list(string)
+  default     = ["t3.medium"]
+}
+
 # ─── TLS (Let's Encrypt on prod overlay only) ─────────────────────────────
 variable "enable_letsencrypt" {
   description = "Install cert-manager + Let's Encrypt ClusterIssuers on the cluster. Only the `prod` overlay's Ingress consumes them — dev/local stay on traefik's self-signed cert (see ADR-008)."
@@ -106,4 +112,10 @@ variable "runner_labels" {
   description = "Labels of the self-hosted runner."
   type        = string
   default     = "self-hosted,linux,x64,k3s-deploy,k3s-dev"
+}
+
+variable "create_oidc_provider" {
+  description = "Create the GitHub OIDC provider in IAM. Only one is allowed per AWS account, so the dev environment creates it (true) and prod reuses it (false)."
+  type        = bool
+  default     = true
 }

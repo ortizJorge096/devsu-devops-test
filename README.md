@@ -54,7 +54,8 @@ flowchart LR
         CERTMGR[cert-manager + ClusterIssuers]
         K3S[k3s single-node cluster]
       subgraph NS_PROD["namespace: demo-devops (prod) - TLS via Let's Encrypt"]
-        DEP[Deployment x1 replica]
+        DEP[Deployment x2 replicas]
+        HPA[HPA 2..3]
         SVC[Service ClusterIP]
         ING[Ingress / traefik - tls: nip.io]
         CM[ConfigMap]
@@ -72,6 +73,7 @@ flowchart LR
         DEP2 --> SVC2 --> ING2
         CM --> DEP
         SEC --> DEP
+        HPA -. scales .-> DEP
         HPA2 -. scales .-> DEP2
         TIMER -. refreshes ECR auth .-> K3S
       end
@@ -133,7 +135,7 @@ flowchart TD
 │       ├── local/               # minikube / docker-desktop, ingress-nginx,
 │       │                        # 2 replicas + HPA 2..6 (brief evidence)
 │       ├── dev/                 # k3s on EC2, traefik, 2 replicas + HPA 2..3
-│       └── prod/                # k3s on EC2, traefik, 1 replica (ADR-006)
+│       └── prod/                # k3s on EC2, traefik, 2 replicas + HPA 2..3 (ADR-006)
 ├── terraform/
 │   ├── bootstrap/               # S3 state bucket (Terraform 1.10 use_lockfile)
 │   ├── modules/
@@ -304,7 +306,7 @@ URL stays stable. See ADR-009 for the full design.
 | **Kustomize base + overlays** (no Helm) | Lighter for a single app, declarative, GitOps-friendly, plays well with `kustomize edit set image` from CI. |
 | **Non-root + read-only rootfs + drop ALL caps** | Pod Security Standard "restricted" is enforced at namespace admission. |
 | **Multi-stage Dockerfile + dumb-init** | Final image ~150 MB; PID 1 forwards SIGTERM → graceful node shutdown. |
-| **Dev: HPA 2..3 / Prod: HPA 1..1** | Brief asks for ≥2 replicas + horizontal scaling — proven on `dev` and `local`. Prod stays at 1 to leave headroom for the colocated runner. (ADR-006, amended) |
+| **Dev: HPA 2..3 / Prod: HPA 2..3** | Brief asks for ≥2 replicas + horizontal scaling — satisfied on every overlay (local, dev, prod). Both AWS environments run on `t3.medium` (4 GiB RAM), which absorbs the colocated runner + k3s control plane without thrashing. (ADR-006, amended twice) |
 | **TLS on prod via cert-manager + Let's Encrypt + nip.io** | Real green-padlock cert at `https://demo-devops.<eip>.nip.io/api/users` with no domain registration and $0 cost. cert-manager runs cluster-wide; only the prod overlay's Ingress is annotated. Dev keeps traefik's self-signed cert to save RAM on the t3.micro. (ADR-005 + ADR-008) |
 | **PodDisruptionBudget** | Voluntary disruptions (node drain, upgrades) never take all pods down. |
 | **NetworkPolicy** | Default-deny ingress; only the ingress controller and same-namespace pods can talk to the app. |
@@ -362,16 +364,130 @@ Add these to **each** environment:
 
 ---
 
-## 9. Pipeline evidence (what to share with the reviewer)
+## 9. Pipeline evidence (verified end-to-end on AWS)
 
-After pushing to `main` for the first time, share with the reviewer:
+This section is a verification report against the test brief — every
+item below has been demonstrated against the current `main` branch
+state on AWS account `864058201845` / `us-east-1`. Concrete identifiers
+and timestamps are included so a reviewer can re-run any check.
 
-1. URL to the `CI/CD` workflow run — **all jobs green**.
-2. Screenshot of the ECR repository in the AWS console showing the pushed image tags (`sha-<hash>`, `latest`, `main`).
-3. URL to the **Security → Code scanning** tab where Trivy + njsscan SARIFs appear.
-4. The Terraform output `app_url` once `terraform apply` finishes — that's the **public endpoint** asked for in the brief.
-5. Output of `kubectl -n demo-devops-dev get deploy,hpa,pdb,svc,ingress` to demonstrate the 2-replica + HPA + PDB setup on the dev overlay.
-6. `curl -v https://demo-devops.<eip>.nip.io/api/users` from any laptop — the TLS handshake should show a Let's Encrypt-issued cert (subject `CN=demo-devops.<eip>.nip.io`, issuer `R10/R11/E1/E5`). No `--insecure` flag needed. (Terraform output `app_url_https`.)
+### 9.1 Pipeline runs (GitHub Actions — all green)
+
+| Run | Branch | Trigger | Deploy job | Duration |
+|---|---|---|---|---|
+| **#40** | `main` | `Merge pull request #1 from ortizJorge096/develop` | `Deploy to k3s (prod)` ✅ — `(dev)` skipped per branch rule | 2m 17s |
+| **#36** | `develop` | `fix(ci): resolve ECR repository name dynamically per branch` | `Deploy to k3s (dev)` ✅ — `(prod)` skipped per branch rule | 6m 27s |
+| **#22** | `develop` | `fix(prod): update nip.io host to 18-235-142-69` | Single `Deploy to k3s (self-hosted)` (pre-split legacy job) | 2m 6s |
+
+Each deploy job uses `if: github.ref == 'refs/heads/<branch>'`, so the
+other environment's job is reported as `skipped`, not failed. The full
+job graph is: **Lint → (Test + Coverage, SAST, Validate K8s) → Build &
+Push (ECR) → Trivy → Deploy**.
+
+### 9.2 Public endpoints
+
+| Environment | URL | Response |
+|---|---|---|
+| **Prod** | `https://demo-devops.18-235-142-69.nip.io/api/users` | `HTTP/2 200`, body `[]` |
+| Dev | `http://demo-devops.54-84-139-24.nip.io/api/users` | `HTTP/1.1 200`, body `[]` |
+
+**TLS on prod — real Let's Encrypt cert, end-to-end verified.**
+`curl -v` shows the chain validates against the system trust store; no
+`-k` / `--insecure` flag. Browsers show the green padlock with no
+warnings.
+
+```
+* Connected to demo-devops.18-235-142-69.nip.io (18.235.142.69) port 443
+* SSL connection using TLSv1.3 / TLS_AES_128_GCM_SHA256 / X25519 / RSASSA-PSS
+* ALPN: server accepted h2
+* Server certificate:
+*  subject: CN=demo-devops.18-235-142-69.nip.io
+*  start date: May 24 11:14:32 2026 GMT
+*  expire date: Aug 22 11:14:31 2026 GMT
+*  subjectAltName: host "demo-devops.18-235-142-69.nip.io" matched cert's "demo-devops.18-235-142-69.nip.io"
+*  issuer: C=US; O=Let's Encrypt; CN=R13
+*  SSL certificate verify ok.
+< HTTP/2 200
+< content-type: application/json; charset=utf-8
+```
+
+Issuer `Let's Encrypt R13` is one of LE's current intermediates.
+cert-manager renews automatically ~30 days before expiry.
+
+### 9.3 Kubernetes state — prod (`kubectl -n demo-devops get deploy,hpa,pdb,svc,ingress`)
+
+```
+NAME                         READY   UP-TO-DATE   AVAILABLE
+deployment.apps/demo-devops  2/2     2            2
+
+NAME                                       REFERENCE                TARGETS                        MINPODS   MAXPODS   REPLICAS
+horizontalpodautoscaler.../demo-devops     Deployment/demo-devops   cpu: 2%/70%, memory: 38%/80%   2         3         2
+
+NAME                                       MIN AVAILABLE   ALLOWED DISRUPTIONS
+poddisruptionbudget.policy/demo-devops     1               1
+
+NAME                  TYPE        CLUSTER-IP      PORT(S)
+service/demo-devops   ClusterIP   10.43.101.192   80/TCP
+
+NAME                                       CLASS     HOSTS                              ADDRESS      PORTS
+ingress.networking.k8s.io/demo-devops      traefik   demo-devops.18-235-142-69.nip.io   10.0.0.108   80, 443
+```
+
+Mapping to the brief:
+
+- **≥ 2 replicas** → `Deployment 2/2 ready`.
+- **Horizontal scaling** → HPA `2..3` envelope reporting real CPU / memory metrics.
+- **ConfigMap + Secret** → consumed via `envFrom` on the Deployment (`kubectl -n demo-devops get cm,secret` lists `demo-devops-config` and `demo-devops-secret`).
+- **Ingress** → traefik, host on nip.io, ports 80 + 443.
+- **PodDisruptionBudget** → `minAvailable: 1` keeps one pod serving during voluntary disruptions.
+- **NetworkPolicy** → default-deny ingress, allowed from `ingress-nginx` / `kube-system` namespaces and same-namespace pods (`kubectl -n demo-devops get netpol`).
+
+### 9.4 AWS infrastructure (account `864058201845`, region `us-east-1`)
+
+| Resource | Identifier |
+|---|---|
+| EC2 — prod | `i-075e2dd6c282e0534` · `t3.medium` · AZ `us-east-1a` · 3/3 status checks · EIP `18.235.142.69` |
+| EC2 — dev | `i-0b2dcd0c53d192543` · `t3.medium` · AZ `us-east-1a` · 3/3 status checks · EIP `54.84.139.24` |
+| ASG — prod | `devsu-devops-test-prod-k3s` · desired = 1 · "At desired capacity" |
+| ASG — dev | `devsu-devops-test-dev-k3s` · desired = 1 · "At desired capacity" |
+| ECR — prod | `864058201845.dkr.ecr.us-east-1.amazonaws.com/devsu-devops-test-prod-nodejs` |
+| ECR — dev | `864058201845.dkr.ecr.us-east-1.amazonaws.com/devsu-devops-test-dev-nodejs` |
+| IAM OIDC provider | `arn:aws:iam::864058201845:oidc-provider/token.actions.githubusercontent.com` (single, shared between envs) |
+| IAM role (CI, prod) | `arn:aws:iam::864058201845:role/devsu-devops-test-prod-gha-deploy` |
+| IAM role (CI, dev) | `arn:aws:iam::864058201845:role/devsu-devops-test-dev-gha-deploy` |
+| SNS topic | `arn:aws:sns:us-east-1:864058201845:devsu-devops-alarms` |
+| SNS subscription | `email` → `jcaballeroo96@gmail.com` · **Confirmed** |
+
+### 9.5 Observability (CloudWatch alarms)
+
+`aws cloudwatch describe-alarms --alarm-names devsu-devops-{cpu-high,memory-high,disk-high,status-check-failed}`:
+
+| Alarm | State | Notes |
+|---|---|---|
+| `devsu-devops-cpu-high` | `OK` | Last datapoint ~0.001% (threshold 80%) |
+| `devsu-devops-memory-high` | `OK` | CW Agent custom metric `mem_used_percent` |
+| `devsu-devops-disk-high` | `OK` | CW Agent custom metric `disk_used_percent` |
+| `devsu-devops-status-check-failed` | Transitions during instance refresh / Spot reclaim | Mode-dependent — see ADR-009 for the ASG-based replacement behavior |
+
+All four alarms publish to the SNS topic above; the confirmed email
+subscription receives notifications.
+
+### 9.6 GitHub repository configuration
+
+- **Environments** — `production` (branch `main`) and `dev` (branch `develop`), each with its own `AWS_ROLE_ARN` environment secret pointing at the matching IAM role from §9.4.
+- **Repository secrets / variables** — `APP_URL`, `AWS_ROLE_ARN` (fallback).
+- **OIDC trust policy** — `sub` claim scoped to `repo:ortizJorge096/devsu-devops-test:environment:<production|dev>` (see `terraform/modules/github-oidc/main.tf`). No static AWS keys committed anywhere.
+
+### 9.7 Local validation (for reviewers without AWS credentials)
+
+- **Docker** — `docker build -t demo-devops-nodejs:dev ./app && docker run --rm -p 8000:8000 demo-devops-nodejs:dev`. `docker ps` reports `STATUS: Up X minutes (healthy)`. `curl -fsS http://localhost:8000/health` → `{"status":"ok","uptime":…,"timestamp":"…"}`.
+- **minikube / docker-desktop** — `scripts/local-deploy.sh` applies the `local` overlay (2 replicas, HPA 2..6). `kubectl -n demo-devops get pods -w` shows both pods `Running`. `scripts/port-forward.sh` + `curl -X POST http://localhost:8080/api/users -d '{"dni":"k8s-001","name":"From K8s"}'` then `GET /api/users` returns the persisted record `[{"id":1,"name":"From K8s","dni":"k8s-001"}]`.
+
+### 9.8 Where to look in the GitHub UI
+
+- **Workflow runs** → Actions tab → `CI/CD` workflow.
+- **Security findings (Trivy + njsscan SARIFs)** → Security tab → Code scanning.
+- **Environments and secrets** → Settings → Secrets and variables → Actions.
 
 ---
 

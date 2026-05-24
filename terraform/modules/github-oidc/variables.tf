@@ -36,3 +36,9 @@ variable "allowed_environments" {
   type        = list(string)
   default     = []
 }
+
+variable "create_oidc_provider" {
+  description = "Create the GitHub OIDC provider. Set false if it already exists in this account (only one allowed per account)."
+  type        = bool
+  default     = true
+}

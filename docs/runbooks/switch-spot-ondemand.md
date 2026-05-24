@@ -108,6 +108,6 @@ Saves ~$5/mo.
 ## Cross-references
 
 - [ADR-009 — Spot recovery via ASG + persistent EIP](../decisions/ADR-009-spot-recovery-with-asg.md)
-- [ADR-006 — Single replica on AWS prod](../decisions/ADR-006-single-replica-on-aws.md)
+- [ADR-006 — Replica strategy on AWS overlays](../decisions/ADR-006-single-replica-on-aws.md)
 - `terraform/modules/ec2-k3s/variables.tf` — the variable definitions
 - `terraform/modules/ec2-k3s/main.tf` — the `mixed_instances_policy` block

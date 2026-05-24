@@ -28,17 +28,19 @@ variable "allowed_branches" {
 }
 
 # ─── Multi-environment knobs ──────────────────────────────────────────────
-# The dev environment tracks the `develop` branch and applies the `dev`
-# overlay at first boot. A future `prod` environment would override these
-# back to `main` / `prod`.
+# These variables exist for symmetry with the dev environment so the same
+# module composition works in both. The defaults below (`develop` / `dev`)
+# are the dev-friendly fallback; this prod environment's terraform.tfvars
+# overrides them to `main` / `prod` so the k3s node clones the right
+# branch and applies the prod overlay (`demo-devops` namespace + TLS).
 variable "git_branch" {
-  description = "Branch cloned by the k3s user-data on first boot. The dev environment defaults to `develop`."
+  description = "Branch cloned by the k3s user-data on first boot. Overridden to `main` in prod's terraform.tfvars."
   type        = string
   default     = "develop"
 }
 
 variable "kustomize_overlay" {
-  description = "Kustomize overlay applied by the k3s user-data on first boot. The dev environment defaults to `dev` (so the `demo-devops-dev` namespace is created)."
+  description = "Kustomize overlay applied by the k3s user-data on first boot. Overridden to `prod` in prod's terraform.tfvars (so the `demo-devops` namespace + TLS patch are applied)."
   type        = string
   default     = "dev"
 }
@@ -89,6 +91,11 @@ variable "instance_type" {
   default     = "t3.micro"
 }
 
+variable "spot_instance_types" {
+  description = "Instance types the ASG is allowed to launch as Spot. Diversifying across types reduces the chance that a single-pool capacity shortage drops the node."
+  type        = list(string)
+  default     = ["t3.medium"]
+}
 # ─── TLS (Let's Encrypt on prod overlay only) ─────────────────────────────
 variable "enable_letsencrypt" {
   description = "Install cert-manager + Let's Encrypt ClusterIssuers on the cluster. Only the `prod` overlay's Ingress consumes them — dev/local stay on traefik's self-signed cert (see ADR-008)."
@@ -107,4 +114,10 @@ variable "runner_labels" {
   description = "Labels of the self-hosted runner. The CI/CD workflow targets specific labels per environment."
   type        = string
   default     = "self-hosted,linux,x64,k3s-deploy,k3s-prod"
+}
+
+variable "create_oidc_provider" {
+  description = "Create the GitHub OIDC provider. Set false if already exists."
+  type        = bool
+  default     = false
 }
