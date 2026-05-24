@@ -16,10 +16,14 @@ data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
 # Only create the OIDC provider once per account.
-# If you already have one (very common), set `var.create_oidc_provider = false`
-# and pass its ARN in `var.existing_oidc_provider_arn`. Simplified here
-# to always create — comment out if the provider already exists.
+# AWS allows a single GitHub OIDC provider per account, so the second
+# environment to apply must reuse the one created by the first. Toggle:
+#   - var.create_oidc_provider = true  -> create it here (used by dev,
+#     which is applied first in this repo).
+#   - var.create_oidc_provider = false -> skip creation and look it up
+#     via the `data` block below (used by prod, see its tfvars).
 resource "aws_iam_openid_connect_provider" "github" {
+  count           = var.create_oidc_provider ? 1 : 0
   url             = "https://token.actions.githubusercontent.com"
   client_id_list  = ["sts.amazonaws.com"]
   # GitHub's OIDC root thumbprint. GitHub now signs with multiple roots —
@@ -31,6 +35,17 @@ resource "aws_iam_openid_connect_provider" "github" {
   tags            = var.tags
 }
 
+# Look up the existing provider only when we're NOT creating it here.
+# Reading it unconditionally would fail with NoSuchEntity on a first
+# apply in a fresh AWS account (the provider doesn't exist yet).
+data "aws_iam_openid_connect_provider" "github" {
+  count = var.create_oidc_provider ? 0 : 1
+  url   = "https://token.actions.githubusercontent.com"
+}
+
+locals {
+  oidc_provider_arn = var.create_oidc_provider ? aws_iam_openid_connect_provider.github[0].arn : data.aws_iam_openid_connect_provider.github[0].arn
+}
 # Trust policy: only GH Actions for this specific repo + listed branches.
 data "aws_iam_policy_document" "trust" {
   statement {
@@ -39,7 +54,7 @@ data "aws_iam_policy_document" "trust" {
 
     principals {
       type        = "Federated"
-      identifiers = [aws_iam_openid_connect_provider.github.arn]
+      identifiers = [local.oidc_provider_arn]
     }
 
     condition {
@@ -48,7 +63,6 @@ data "aws_iam_policy_document" "trust" {
       values   = ["sts.amazonaws.com"]
     }
 
-    # `repo:owner/repo:ref:refs/heads/<branch>` — pin to specific branches.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
@@ -58,11 +72,13 @@ data "aws_iam_policy_document" "trust" {
           for b in var.allowed_branches :
           "repo:${var.github_owner}/${var.github_repo}:ref:refs/heads/${b}"
         ],
-        # Environment-based claims (deploy job — sub changes when job has environment: set)
+        # Environment-based claims (deploy job)
         [
           for e in var.allowed_environments :
           "repo:${var.github_owner}/${var.github_repo}:environment:${e}"
-        ]
+        ],
+        # Pull request events use a different sub format (no ref prefix)
+        ["repo:${var.github_owner}/${var.github_repo}:pull_request"]
       )
     }
   }
