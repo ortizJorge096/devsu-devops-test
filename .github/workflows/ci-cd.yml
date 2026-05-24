@@ -133,7 +133,12 @@ jobs:
         id: tags
         run: |
           REG="${{ steps.ecr.outputs.registry }}"
-          REPO="${{ env.ECR_REPOSITORY }}"
+          # Pick repo based on branch
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            REPO="devsu-devops-test-prod-nodejs"
+          else
+            REPO="devsu-devops-test-dev-nodejs"
+          fi
           SHA="sha-$(git rev-parse --short HEAD)"
           BRANCH="$(echo '${{ github.ref_name }}' | tr '/' '-')"
           IMAGE="$REG/$REPO"
