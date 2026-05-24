@@ -152,7 +152,8 @@ flowchart TD
 ├── .github/workflows/
 │   └── ci-cd.yml                # main pipeline (lint, test, SAST, build, scan, deploy)
 ├── docs/
-│   └── decisions/               # ADRs (architecture decision records)
+│   ├── decisions/               # ADRs (architecture decision records)
+│   └── screenshots/             # Visual evidence — see §9
 ├── .gitleaks.toml
 ├── LICENSE
 └── README.md
@@ -371,6 +372,8 @@ item below has been demonstrated against the current `main` branch
 state on AWS account `864058201845` / `us-east-1`. Concrete identifiers
 and timestamps are included so a reviewer can re-run any check.
 
+Screenshots are stored in `docs/screenshots/`.
+
 ### 9.1 Pipeline runs (GitHub Actions — all green)
 
 | Run | Branch | Trigger | Deploy job | Duration |
@@ -383,6 +386,20 @@ Each deploy job uses `if: github.ref == 'refs/heads/<branch>'`, so the
 other environment's job is reported as `skipped`, not failed. The full
 job graph is: **Lint → (Test + Coverage, SAST, Validate K8s) → Build &
 Push (ECR) → Trivy → Deploy**.
+
+**Run #40 — `main` → prod deploy (all jobs green):**
+
+![GitHub Actions run #40 — main branch, prod deploy](docs/screenshots/13-gh-actions-run-40.png)
+
+**Run #36 — `develop` → dev deploy (all jobs green):**
+
+![GitHub Actions run #36 — develop branch, dev deploy](docs/screenshots/12-gh-actions-run-36.png)
+
+**Run #22 — `develop` (legacy single-deploy job):**
+
+![GitHub Actions run #22 — develop branch](docs/screenshots/08-gh-actions-run-22.png)
+
+---
 
 ### 9.2 Public endpoints
 
@@ -414,6 +431,20 @@ warnings.
 Issuer `Let's Encrypt R13` is one of LE's current intermediates.
 cert-manager renews automatically ~30 days before expiry.
 
+**`curl -v` — TLS handshake completo con Let's Encrypt R13:**
+
+![curl -v mostrando TLS 1.3 con certificado Let's Encrypt válido](docs/screenshots/01-https-curl-tls.png)
+
+**Browser prod — HTTPS con candado verde (`18-235-142-69.nip.io`):**
+
+![Browser mostrando endpoint prod HTTPS respondiendo []](docs/screenshots/16-browser-prod-https.png)
+
+**Browser dev — HTTP (`54.84.139.24.nip.io`):**
+
+![Browser mostrando endpoint dev HTTP respondiendo []](docs/screenshots/10-browser-dev-endpoint.png)
+
+---
+
 ### 9.3 Kubernetes state — prod (`kubectl -n demo-devops get deploy,hpa,pdb,svc,ingress`)
 
 ```
@@ -442,6 +473,10 @@ Mapping to the brief:
 - **PodDisruptionBudget** → `minAvailable: 1` keeps one pod serving during voluntary disruptions.
 - **NetworkPolicy** → default-deny ingress, allowed from `ingress-nginx` / `kube-system` namespaces and same-namespace pods (`kubectl -n demo-devops get netpol`).
 
+![kubectl get deploy, hpa, pdb, svc, ingress — todos los recursos activos en prod](docs/screenshots/17-kubectl-resources.png)
+
+---
+
 ### 9.4 AWS infrastructure (account `864058201845`, region `us-east-1`)
 
 | Resource | Identifier |
@@ -458,6 +493,32 @@ Mapping to the brief:
 | SNS topic | `arn:aws:sns:us-east-1:864058201845:devsu-devops-alarms` |
 | SNS subscription | `email` → `jcaballeroo96@gmail.com` · **Confirmed** |
 
+**EC2 instances — prod y dev corriendo (3/3 status checks):**
+
+![AWS EC2 console — 2 instancias running con 3/3 status checks](docs/screenshots/11-aws-ec2-instances.png)
+
+**Auto Scaling Groups — prod y dev:**
+
+![AWS Auto Scaling Groups — devsu-devops-test-prod-k3s y dev-k3s](docs/screenshots/14-aws-asg-list.png)
+
+**ASG prod — capacity detail:**
+
+![AWS ASG prod — desired capacity = 1, scaling limits 1-1](docs/screenshots/15-aws-asg-prod-detail.png)
+
+**Terraform outputs — identifiers completos:**
+
+![terraform output mostrando app_url, ECR, OIDC role ARN, SNS topic](docs/screenshots/07-terraform-outputs.png)
+
+**AWS CLI — EC2 running, IAM OIDC provider, SNS subscription confirmed, CloudWatch alarms:**
+
+![AWS CLI describe-instances, list-open-id-connect-providers, sns subscriptions, cloudwatch alarms](docs/screenshots/06-aws-cli-infra-alarms.png)
+
+**SNS subscription — email confirmado:**
+
+![AWS SNS — Subscription confirmed para jcaballeroo96@gmail.com](docs/screenshots/05-sns-subscription-confirmed.png)
+
+---
+
 ### 9.5 Observability (CloudWatch alarms)
 
 `aws cloudwatch describe-alarms --alarm-names devsu-devops-{cpu-high,memory-high,disk-high,status-check-failed}`:
@@ -472,22 +533,45 @@ Mapping to the brief:
 All four alarms publish to the SNS topic above; the confirmed email
 subscription receives notifications.
 
+> The CloudWatch alarms output is visible in the combined AWS CLI screenshot above (`06-aws-cli-infra-alarms.png`), which shows the full `describe-alarms` table with state values and threshold reasons.
+
+**Alarma real recibida por email — `devsu-devops-status-check-failed` en acción:**
+
+![Email de AWS Notifications confirmando que la alarma devsu-devops-status-check-failed disparó y llegó al correo suscrito](docs/screenshots/06b-cloudwatch-alarm-email.png)
+
+> La alarma `status-check-failed` transitó a `ALARM` el viernes 22 de mayo cuando la instancia
+> Spot fue reemplazada por el ASG (comportamiento esperado — ver ADR-009). El email confirma
+> que el pipeline completo de observabilidad funciona: CloudWatch → SNS topic → email entregado
+> a `jcaballeroo96@gmail.com`.
+
+---
+
 ### 9.6 GitHub repository configuration
 
 - **Environments** — `production` (branch `main`) and `dev` (branch `develop`), each with its own `AWS_ROLE_ARN` environment secret pointing at the matching IAM role from §9.4.
 - **Repository secrets / variables** — `APP_URL`, `AWS_ROLE_ARN` (fallback).
 - **OIDC trust policy** — `sub` claim scoped to `repo:ortizJorge096/devsu-devops-test:environment:<production|dev>` (see `terraform/modules/github-oidc/main.tf`). No static AWS keys committed anywhere.
 
+![GitHub Actions secrets — environments production y dev con AWS_ROLE_ARN](docs/screenshots/09-gh-secrets-environments.png)
+
+---
+
 ### 9.7 Local validation (for reviewers without AWS credentials)
 
 - **Docker** — `docker build -t demo-devops-nodejs:dev ./app && docker run --rm -p 8000:8000 demo-devops-nodejs:dev`. `docker ps` reports `STATUS: Up X minutes (healthy)`. `curl -fsS http://localhost:8000/health` → `{"status":"ok","uptime":…,"timestamp":"…"}`.
 - **minikube / docker-desktop** — `scripts/local-deploy.sh` applies the `local` overlay (2 replicas, HPA 2..6). `kubectl -n demo-devops get pods -w` shows both pods `Running`. `scripts/port-forward.sh` + `curl -X POST http://localhost:8080/api/users -d '{"dni":"k8s-001","name":"From K8s"}'` then `GET /api/users` returns the persisted record `[{"id":1,"name":"From K8s","dni":"k8s-001"}]`.
 
-### 9.8 Where to look in the GitHub UI
+**Docker — container corriendo con healthcheck OK:**
 
-- **Workflow runs** → Actions tab → `CI/CD` workflow.
-- **Security findings (Trivy + njsscan SARIFs)** → Security tab → Code scanning.
-- **Environments and secrets** → Settings → Secrets and variables → Actions.
+![docker ps mostrando container healthy en puerto 8000](docs/screenshots/02-docker-ps-healthy.png)
+
+**Docker — health endpoint respondiendo:**
+
+![curl /health retornando status ok con uptime y timestamp](docs/screenshots/03-docker-health-check.png)
+
+**Kubernetes local — pods running + port-forward + POST/GET users:**
+
+![kubectl get pods, port-forward y curl demostrando persistencia de datos en K8s local](docs/screenshots/04-k8s-local-validation.png)
 
 ---
 
