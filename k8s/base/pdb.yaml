@@ -1,0 +1,16 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: demo-devops
+  labels:
+    app.kubernetes.io/name: demo-devops
+    app.kubernetes.io/component: api
+spec:
+  # Always keep at least 1 pod up during voluntary disruptions
+  # (node drains, cluster upgrades). With replicas=2 this means
+  # rolling updates take one pod down at a time.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: demo-devops
+      app.kubernetes.io/component: api

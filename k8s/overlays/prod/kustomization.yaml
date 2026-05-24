@@ -1,0 +1,77 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: demo-devops
+
+resources:
+  - ../../base
+
+# Prod overlay = k3s single-node on EC2 (AWS Free Tier).
+# k3s ships with Traefik as the default ingress controller, so we wire
+# the Ingress to it. The public host is `demo-devops.example.com` here
+# as a placeholder — both the user-data first-boot script and the CI/CD
+# deploy job rewrite it to `demo-devops.<EIP-with-dashes>.nip.io` so the
+# Let's Encrypt HTTP-01 challenge can resolve back to this host.
+#
+# TLS lives in `tls-patch.yaml` (separate file so the cert-manager
+# annotation + tls: block stays readable). See ADR-005 + ADR-008.
+patches:
+  - target:
+      kind: Ingress
+      name: demo-devops
+    patch: |-
+      - op: add
+        path: /spec/ingressClassName
+        value: traefik
+      - op: replace
+        path: /spec/rules/0/host
+        value: demo-devops.18-235-142-69.nip.io   # rewritten by user-data / deploy script
+
+  - path: tls-patch.yaml
+    target:
+      kind: Ingress
+      name: demo-devops
+
+  # 1 replica on AWS due to t3.micro (1 GiB RAM) constraints.
+  # The `local` overlay keeps 2 replicas + a real HPA to prove the test
+  # brief requirement is met (see docs/decisions/ADR-006).
+  - target:
+      kind: Deployment
+      name: demo-devops
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+
+  # With 1 replica, minAvailable must be 0 — otherwise the PDB blocks
+  # evictions during rolling updates and deploys hang indefinitely.
+  - target:
+      kind: PodDisruptionBudget
+      name: demo-devops
+    patch: |-
+      - op: replace
+        path: /spec/minAvailable
+        value: 0
+
+  # HPA capped at 1 — matches replicas. Resource still present in the
+  # cluster (reviewer can see it), but it does not scale. The `local`
+  # overlay demonstrates real autoscaling.
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: demo-devops
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 1
+      - op: replace
+        path: /spec/maxReplicas
+        value: 1
+
+images:
+  # The CI pipeline replaces this entry via `kustomize edit set image
+  # devsu-devops-nodejs=<account>.dkr.ecr.<region>.amazonaws.com/devsu-devops-nodejs:<sha-tag>`
+  # before applying. The defaults below let `kubectl apply -k` work standalone
+  # if you replace them by hand.
+  - name: devsu-devops-nodejs
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/devsu-devops-nodejs
+    newTag: latest

@@ -1,0 +1,13 @@
+# gitleaks config — allowlist the example files we ship intentionally.
+[allowlist]
+description = "Allow demo placeholder credentials in committed examples"
+paths = [
+  '''app/\.env\.example''',
+  '''k8s/base/secret\.yaml''',
+  '''terraform/environments/dev/terraform\.tfvars\.example''',
+]
+regexes = [
+  '''dXNlcg==''',                 # base64 of "user"
+  '''cGFzc3dvcmQ=''',             # base64 of "password"
+  '''DATABASE_PASSWORD="password"''',
+]

@@ -55,4 +55,4 @@ Thumbs.db
 # =========================
 tmp/
 temp/
-.cache/
+.cache/*.tfplan

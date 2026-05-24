@@ -1,0 +1,59 @@
+# docker-compose for local development & smoke-testing the image.
+#
+# Usage:
+#   docker compose up --build           # build + run the app on :8000
+#   docker compose ps                   # see the healthcheck status
+#   docker compose logs -f api
+#   docker compose down -v              # stop and wipe the sqlite volume
+#
+# Run the tests inside the image (uses the `test` stage of the Dockerfile):
+#   docker compose --profile test run --rm tests
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: demo-devops-nodejs:dev
+    container_name: demo-devops-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      NODE_ENV: production
+      PORT: "8000"
+      DATABASE_NAME: "/usr/src/app/data/dev.sqlite"
+      DATABASE_USER: "user"
+      DATABASE_PASSWORD: "password"
+    volumes:
+      # Persist the sqlite file across container restarts.
+      - api-data:/usr/src/app/data
+    healthcheck:
+      # Same probe as the K8s liveness/readiness probes.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    # Cap resources to mirror the k8s Deployment limits — catches OOM early.
+    deploy:
+      resources:
+        limits:
+          cpus: "0.30"
+          memory: "256M"
+
+  # Optional: run the test stage of the multi-stage Dockerfile.
+  # Activated only when --profile test is passed, so `docker compose up`
+  # doesn't run tests by default.
+  tests:
+    profiles: ["test"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: test
+    image: demo-devops-nodejs:test
+    command: ["npm", "run", "test:coverage"]
+
+volumes:
+  api-data:

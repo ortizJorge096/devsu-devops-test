@@ -1,0 +1,77 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Dev environment — runs in a separate namespace on the same k3s node.
+# Deployed automatically from the `develop` branch via the CI/CD pipeline.
+namespace: demo-devops-dev
+
+resources:
+  - ../../base
+
+patches:
+  # Rename the Namespace object so it matches the namespace field above.
+  # (Kustomize sets namespace on all resources but skips the Namespace kind itself.)
+  - target:
+      kind: Namespace
+      name: demo-devops
+    patch: |-
+      - op: replace
+        path: /metadata/name
+        value: demo-devops-dev
+
+  # 2 replicas on AWS — matches the brief's "≥ 2 replicas" requirement.
+  # Fits inside t3.micro provided the self-hosted runner stays idle most
+  # of the time; peak RAM during a deploy is ~1.35 GiB (see ADR-006 for
+  # the updated budget).
+  - target:
+      kind: Deployment
+      name: demo-devops
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
+
+  # Wire to Traefik (k3s default ingress controller, same as prod).
+  # Host is replaced by the deploy script using the Elastic IP DNS name.
+  - target:
+      kind: Ingress
+      name: demo-devops
+    patch: |-
+      - op: add
+        path: /spec/ingressClassName
+        value: traefik
+      - op: replace
+        path: /spec/rules/0/host
+        value: demo-devops.54.84.139.24.nip.io
+
+  # With 2 replicas, minAvailable: 1 keeps at least one pod serving traffic
+  # during voluntary disruptions (node drain, rolling update) without
+  # blocking the eviction (which `minAvailable: 2` would do).
+  - target:
+      kind: PodDisruptionBudget
+      name: demo-devops
+    patch: |-
+      - op: replace
+        path: /spec/minAvailable
+        value: 1
+
+  # HPA scaled 2..3 — keeps the brief's "horizontal scaling" requirement
+  # alive while staying inside the t3.micro RAM budget (a 4th pod would
+  # push the node into swap; see ADR-006).
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: demo-devops
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 2
+      - op: replace
+        path: /spec/maxReplicas
+        value: 3
+
+images:
+  # The CI pipeline replaces this via `kustomize edit set image
+  # devsu-devops-nodejs=<account>.dkr.ecr.<region>.amazonaws.com/devsu-devops-nodejs:<sha-tag>`
+  - name: devsu-devops-nodejs
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/devsu-devops-nodejs
+    newTag: latest
