@@ -5,34 +5,63 @@ variable "name" {
 }
 
 variable "vpc_id" {
-  description = "ID of the VPC where the SG and EC2 will live. Required (no default VPC fallback)."
+  description = "ID of the VPC where the SG and EC2 will live."
   type        = string
 }
 
 variable "subnet_id" {
-  description = "ID of the public subnet where the EC2 will be launched. Required."
+  description = "ID of the public subnet where instances will be launched."
   type        = string
 }
 
 variable "instance_type" {
-  description = "EC2 instance type. t3.micro / t2.micro are AWS Free Tier eligible."
+  description = "Default EC2 instance type baked into the launch template. The ASG mixed_instances_policy overrides it per pool."
   type        = string
   default     = "t3.micro"
 }
 
+# ─── Spot / ASG ───────────────────────────────────────────────────────────
+variable "spot_instance_types" {
+  description = "Instance types the ASG is allowed to launch as Spot. Diversifying across types reduces the chance that a single-pool capacity shortage drops the node (ADR-009)."
+  type        = list(string)
+  default = [
+    "t3.micro",
+    "t3a.micro",
+    "t2.micro",
+    "t3.small",
+    "t3a.small",
+  ]
+}
+
+variable "on_demand_base_capacity" {
+  description = "Minimum number of on-demand instances. Set to 1 with desired=1 to force pure on-demand (emergency switch when all Spot pools are out of capacity)."
+  type        = number
+  default     = 0
+}
+
+variable "on_demand_percentage_above_base_capacity" {
+  description = "Percentage of capacity above on_demand_base_capacity that runs on on-demand. 0 = pure Spot above the base; 100 = all on-demand."
+  type        = number
+  default     = 0
+  validation {
+    condition     = var.on_demand_percentage_above_base_capacity >= 0 && var.on_demand_percentage_above_base_capacity <= 100
+    error_message = "on_demand_percentage_above_base_capacity must be in [0, 100]."
+  }
+}
+
 variable "image_ref" {
-  description = "Full ECR image reference deployed to k3s (e.g. 123.dkr.ecr.us-east-1.amazonaws.com/devsu-devops-nodejs:sha-abc1234)."
+  description = "Full ECR image reference deployed to k3s."
   type        = string
 }
 
 variable "aws_region" {
-  description = "AWS region for ECR (used by amazon-ecr-credential-helper on the node)."
+  description = "AWS region for ECR + EIP re-association."
   type        = string
   default     = "us-east-1"
 }
 
 variable "public_host" {
-  description = "Host for the Ingress rule. Leave blank for any-host routing on traefik."
+  description = "Host for the Ingress rule. Leave blank to derive a nip.io FQDN from the EIP."
   type        = string
   default     = ""
 }
@@ -48,17 +77,14 @@ variable "github_repo" {
 }
 
 # ─── Multi-environment knobs ──────────────────────────────────────────────
-# These two control what gets cloned + applied at first boot. Defaults match
-# the "production" environment (main branch, prod overlay) so the module is
-# safe to call without overrides. The `dev` environment overrides both.
 variable "git_branch" {
-  description = "Git branch to clone in userdata for the initial bootstrap apply (e.g. `main` for prod, `develop` for dev). The self-hosted runner takes over for subsequent deploys, so this only affects the first apply done by cloud-init."
+  description = "Git branch to clone in userdata for the initial bootstrap apply (main for prod, develop for dev)."
   type        = string
   default     = "main"
 }
 
 variable "kustomize_overlay" {
-  description = "Kustomize overlay under `k8s/overlays/` to apply at first boot (e.g. `prod`, `dev`). Must exist in the cloned repo at the branch above."
+  description = "Kustomize overlay under k8s/overlays/ to apply at first boot."
   type        = string
   default     = "prod"
 }
@@ -70,17 +96,14 @@ variable "cloudwatch_agent_config" {
 }
 
 # ─── Let's Encrypt (cert-manager) ─────────────────────────────────────────
-# Adds ~80-120 MB RAM cluster-wide (cert-manager controller + webhook +
-# cainjector). Only the prod overlay's Ingress consumes the issuer —
-# dev/local Ingresses stay self-signed (see ADR-008).
 variable "enable_letsencrypt" {
-  description = "Install cert-manager on first boot and provision Let's Encrypt ClusterIssuers (prod + staging). The prod overlay's Ingress is annotated to use `letsencrypt-prod`; dev overlay stays on traefik's self-signed cert."
+  description = "Install cert-manager on first boot and provision Let's Encrypt ClusterIssuers (prod + staging)."
   type        = bool
   default     = false
 }
 
 variable "letsencrypt_email" {
-  description = "Contact email for the Let's Encrypt ACME account. Required when enable_letsencrypt is true — Let's Encrypt uses it for expiry notifications. Not exposed publicly."
+  description = "Contact email for the Let's Encrypt ACME account."
   type        = string
   default     = ""
 }
@@ -93,14 +116,14 @@ variable "tags" {
 
 # ─── Self-hosted GitHub Actions runner ────────────────────────────────────
 variable "github_token" {
-  description = "Fine-grained PAT with `Administration: read+write` on the repo (or classic with `repo` scope). Used in user-data only to fetch an ephemeral runner registration-token. Leave empty to skip the runner install."
+  description = "Fine-grained PAT with Administration:read+write on the repo. Used in user-data only — for runner registration AND to delete stale offline runners left by previously reclaimed instances."
   type        = string
   default     = ""
   sensitive   = true
 }
 
 variable "runner_labels" {
-  description = "Labels of the self-hosted runner. The CI/CD workflow targets the `k3s-deploy` label."
+  description = "Labels of the self-hosted runner. The CI/CD workflow targets specific labels per environment."
   type        = string
   default     = "self-hosted,linux,x64,k3s-deploy"
 }

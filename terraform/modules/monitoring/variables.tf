@@ -4,14 +4,22 @@ variable "name" {
 }
 
 variable "alarm_email" {
-  description = "Email that receives alarm notifications. Leave blank to skip the email subscription (you'll get the topic ARN but no notifications)."
+  description = "Email that receives alarm notifications. Leave blank to skip the email subscription."
+  type        = string
+  default     = ""
+}
+
+# One of `asg_name` (preferred) or `instance_id` must be supplied.
+variable "asg_name" {
+  description = "Auto Scaling Group name to monitor. Preferred over instance_id because the dimension survives Spot reclaims."
   type        = string
   default     = ""
 }
 
 variable "instance_id" {
-  description = "EC2 instance ID to monitor."
+  description = "EC2 instance ID to monitor (legacy bare-EC2 deployments). Mutually exclusive with asg_name."
   type        = string
+  default     = ""
 }
 
 variable "cpu_threshold_percent" {

@@ -43,13 +43,16 @@ flowchart LR
   subgraph AWS["AWS account (Free Tier-ish)"]
     direction TB
     ECR[(Amazon ECR)]
-    EIP[Elastic IP]
-    subgraph EC2["EC2 t3.micro - SPOT one-time - Amazon Linux 2023"]
+    EIP[Elastic IP - persistent]
+    subgraph ASG["AutoScalingGroup desired=1 - Mixed Instances Policy - capacity_rebalance"]
       direction TB
-      RUNNER[gh self-hosted runner - systemd]
-      TIMER[refresh-ecr-token.timer - 8h]
-      CERTMGR[cert-manager + ClusterIssuers]
-      K3S[k3s single-node cluster]
+      LT[Launch Template - AL2023 + user-data]
+      subgraph EC2["EC2 Spot (t3.micro/small + on-demand fallback)"]
+        direction TB
+        RUNNER[gh self-hosted runner - systemd]
+        TIMER[refresh-ecr-token.timer - 8h]
+        CERTMGR[cert-manager + ClusterIssuers]
+        K3S[k3s single-node cluster]
       subgraph NS_PROD["namespace: demo-devops (prod) - TLS via Let's Encrypt"]
         DEP[Deployment x1 replica]
         SVC[Service ClusterIP]
@@ -65,17 +68,19 @@ flowchart LR
         SVC2[Service ClusterIP]
         ING2[Ingress / traefik]
       end
-      DEP --> SVC --> ING
-      DEP2 --> SVC2 --> ING2
-      CM --> DEP
-      SEC --> DEP
-      HPA2 -. scales .-> DEP2
-      TIMER -. refreshes ECR auth .-> K3S
+        DEP --> SVC --> ING
+        DEP2 --> SVC2 --> ING2
+        CM --> DEP
+        SEC --> DEP
+        HPA2 -. scales .-> DEP2
+        TIMER -. refreshes ECR auth .-> K3S
+      end
+      LT -. cloud-init .-> EC2
     end
-    EIP --> EC2
+    EIP -- re-associated by user-data on every boot --> EC2
     S3[(S3 - TF state - use_lockfile)]
     OIDC[IAM OIDC role GH->AWS]
-    SNS[(SNS - CloudWatch alarms)]
+    SNS[(SNS - CloudWatch alarms - dim: AutoScalingGroupName)]
   end
 
   ECR -. image pull via instance profile token .-> K3S
@@ -254,9 +259,11 @@ terraform destroy
 
 ### 5.3 Cost profile
 
-The EC2 instance is provisioned as **Spot, one-time** (`market_type = "spot"`,
-`spot_instance_type = "one-time"`). This is documented in
-`terraform/modules/ec2-k3s/main.tf`.
+The EC2 instance lives inside an **Auto Scaling Group (size 1)** with a
+Mixed Instances Policy across five Spot pools (t3/t3a micro+small, t2.micro)
+and `capacity_rebalance = true`. AWS replaces the instance automatically
+on reclaim and the user-data re-attaches the persistent EIP so the public
+URL stays stable. See ADR-009 for the full design.
 
 | Resource | Free Tier on-demand | Spot reality (this repo) |
 |---|---|---|
@@ -270,11 +277,13 @@ The EC2 instance is provisioned as **Spot, one-time** (`market_type = "spot"`,
 | **Total after Free Tier** | | **~$3–4/mo** (Spot is the cheap path) |
 
 > Trade-off: Spot is ~70% cheaper than on-demand outside Free Tier, but
-> AWS can reclaim the instance with a 2-minute warning. The user-data
-> script bootstraps k3s + the app from scratch, so re-running
-> `terraform apply` rebuilds the cluster in ~5–7 minutes. For a demo this
-> is acceptable; for a production workload, switch
-> `spot_instance_type = "persistent"` (or move to on-demand).
+> AWS can reclaim the instance with a 2-minute warning. With the ASG
+> recovery in place (ADR-009), **AWS launches a replacement automatically**
+> from the same Launch Template; the user-data brings k3s + the app back
+> in ~5–7 minutes and re-attaches the persistent EIP so the public URL is
+> unchanged. To force pure on-demand during a multi-pool Spot drought,
+> set `on_demand_percentage_above_base_capacity = 100` in the env tfvars
+> and re-apply (no code change needed).
 
 > Always `terraform destroy` once the test is reviewed to avoid the small
 > recurring Spot + EBS bill.
@@ -286,7 +295,7 @@ The EC2 instance is provisioned as **Spot, one-time** (`market_type = "spot"`,
 | Decision | Why |
 |---|---|
 | **k3s on t3.micro** instead of EKS | EKS control plane is $73/mo flat — not Free Tier. k3s is CNCF-certified, single binary, fits 1 GiB RAM. (ADR-001) |
-| **Spot, one-time lifecycle** | Cheapest sustainable cost outside Free Tier (~70% off). The cluster is fully reproducible from user-data, so a reclaim is a "re-apply" away. |
+| **Spot via ASG + Mixed Instances Policy** | Cheapest sustainable cost outside Free Tier (~70% off) **and** auto-recovery from reclaims. `capacity_rebalance` swaps the instance before the 2-min interruption notice, the EIP is re-attached by user-data, stale GitHub runners are cleaned up via API, and CloudWatch alarms use the ASG dimension so they survive the swap. (ADR-009) |
 | **Amazon ECR** as primary registry | Coherent with AWS-native infra: same IaC provisions the registry AND the IAM/OIDC permissions to push from CI / pull from the EC2 instance profile. No static keys, no PATs. (ADR-003) |
 | **OIDC GH → AWS** instead of static keys | Short-lived STS tokens, scoped per repo+branch+environment, no `AWS_ACCESS_KEY_ID` secret to leak. |
 | **ECR token refresh via systemd timer** | k3s' containerd doesn't honor docker credential helpers in `registries.yaml`. The user-data writes a `refresh-ecr-token.sh` script + a `.timer` unit that re-fetches a 12h ECR token every 8h using the instance profile. No `imagePullSecrets`, no CronJob inside the cluster. |
@@ -376,7 +385,9 @@ After pushing to `main` for the first time, share with the reviewer:
 | EC2 has no kubectl access | Open a shell via the Terraform output `ssm_session_command`, then `sudo cat /etc/rancher/k3s/k3s.yaml`. To use it from your laptop, rewrite `server: https://<EIP>:6443`. |
 | Healthcheck fails inside Docker | The image uses `wget`; if you replace the base image, install `wget` or switch to `curl --fail`. |
 | `Deploy` job fails: "no runner matching labels [self-hosted, k3s-deploy]" | The EC2 finished `user-data` but didn't register. Check `journalctl -u actions.runner.*` on the box. Most common cause: `github_token` was missing or expired at `terraform apply` time. |
-| Spot reclamation message in AWS console | AWS reclaimed the instance. Re-run `terraform apply` — the user-data brings k3s + the app back in ~5–7 minutes. A new EIP triggers a new Let's Encrypt order (within the rate limit). |
+| Spot reclamation message in AWS console | The ASG launches a replacement automatically (~30-90 s after the rebalance recommendation). Check `aws autoscaling describe-scaling-activities --auto-scaling-group-name $(terraform output -raw asg_name)` for status, or watch the AWS console. The persistent EIP is re-attached by user-data within the first minute of boot, so the `nip.io` URL stays valid. (ADR-009) |
+| `Deploy` job hangs "Waiting for a runner to pick up this job" right after a reclaim | The previous runner is offline and the replacement is still booting (~5-7 min). The new instance auto-deletes the offline runner before registering itself. Just wait — or re-run the failed job. |
+| Pure Spot capacity gone across all pools | Edit the env tfvars: set `on_demand_percentage_above_base_capacity = 100` and `terraform apply`. The ASG will launch on-demand from the same Launch Template. Revert when Spot recovers. |
 | Out-of-memory on dev pod | t3.micro is tight with 2 replicas + the runner. Either turn off `cloudwatch_agent_config` or move to `t3.small` (see ADR-006 migration path). |
 | TLS handshake fails on prod (`SSL_ERROR_NO_CYPHER_OVERLAP` / NET::ERR_CERT_AUTHORITY_INVALID) | cert-manager hasn't issued the cert yet. `kubectl -n demo-devops describe certificate demo-devops-tls` shows the status. Most common: the ACME HTTP-01 challenge failed because the nip.io FQDN doesn't resolve back to this EIP (check `dig demo-devops.<eip>.nip.io`). Until issuance succeeds, traefik serves its self-signed default — same UX as dev. |
 | Let's Encrypt rate-limit error in cert-manager logs | nip.io shares one eTLD+1 across all users. Switch the Ingress annotation to `letsencrypt-staging` (already provisioned) and re-test; switch back after 7 days. ADR-008 §"Migration paths" covers this. |

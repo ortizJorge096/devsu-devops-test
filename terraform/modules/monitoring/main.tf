@@ -1,26 +1,37 @@
 # ──────────────────────────────────────────────────────────────────────────
 # Monitoring module — SNS topic + CloudWatch alarms.
 #
-# Alarms created:
-#   - CPU utilization > N% (native EC2 metric)
-#   - Status check failed (auto-recovery action)
-#   - Memory utilization > N% (custom metric from CloudWatch Agent)
-#   - Disk utilization > N% on the root volume (custom metric)
-#
-# Notifications go to the SNS topic; if an email is provided, a confirmable
-# subscription is created. The recipient must click the confirmation link
-# the first time.
-#
-# Free Tier note:
-#   - SNS: first 1M publishes/month free.
-#   - CloudWatch alarms: first 10 alarms free per account.
-#   - CloudWatch custom metrics: first 10 metrics free per account.
+# Supports two modes:
+#   - asg_name (preferred): dimensions key on AutoScalingGroupName so the
+#     alarms keep working after a Spot reclaim replaces the underlying
+#     instance. The auto-recover action is NOT attached because the ASG
+#     itself handles replacement on StatusCheckFailed_System.
+#   - instance_id (legacy bare-EC2): dimensions key on InstanceId and the
+#     status-check alarm attaches the ec2:recover action.
 # ──────────────────────────────────────────────────────────────────────────
 
-# ─── SNS topic for alarm notifications ────────────────────────────────────
+locals {
+  use_asg = var.asg_name != ""
+  use_iid = var.instance_id != ""
+
+  ec2_dimensions = local.use_asg ? {
+    AutoScalingGroupName = var.asg_name
+    } : {
+    InstanceId = var.instance_id
+  }
+}
+
+resource "terraform_data" "validate_input" {
+  lifecycle {
+    precondition {
+      condition     = local.use_asg != local.use_iid
+      error_message = "monitoring module requires exactly one of `asg_name` or `instance_id` to be set."
+    }
+  }
+}
+
 resource "aws_sns_topic" "alarms" {
   name = "${var.name}-alarms"
-
   tags = merge(var.tags, { Name = "${var.name}-alarms" })
 }
 
@@ -31,7 +42,6 @@ resource "aws_sns_topic_subscription" "email" {
   endpoint  = var.alarm_email
 }
 
-# Allow CloudWatch to publish to the topic.
 data "aws_iam_policy_document" "topic" {
   statement {
     sid     = "AllowCloudWatchPublish"
@@ -50,6 +60,8 @@ resource "aws_sns_topic_policy" "alarms" {
   policy = data.aws_iam_policy_document.topic.json
 }
 
+data "aws_region" "current" {}
+
 # ─── CPU utilization alarm ────────────────────────────────────────────────
 resource "aws_cloudwatch_metric_alarm" "cpu_high" {
   alarm_name          = "${var.name}-cpu-high"
@@ -63,21 +75,17 @@ resource "aws_cloudwatch_metric_alarm" "cpu_high" {
   comparison_operator = "GreaterThanThreshold"
   treat_missing_data  = "notBreaching"
 
-  dimensions = {
-    InstanceId = var.instance_id
-  }
+  dimensions = local.ec2_dimensions
 
   alarm_actions = [aws_sns_topic.alarms.arn]
   ok_actions    = [aws_sns_topic.alarms.arn]
-
-  tags = var.tags
+  tags          = var.tags
 }
 
-# ─── Status check failed alarm + EC2 auto-recovery ────────────────────────
-# StatusCheckFailed is 0 (passing) or 1 (failing). If it averages > 0 for
-# even one period, something is wrong. The recover action restarts the
-# instance on healthy hardware automatically.
+# ─── Status check failed (legacy bare-EC2 only — auto-recover) ───────────
 resource "aws_cloudwatch_metric_alarm" "status_check" {
+  count = local.use_iid ? 1 : 0
+
   alarm_name          = "${var.name}-status-check-failed"
   alarm_description   = "EC2 status check has been failing"
   namespace           = "AWS/EC2"
@@ -93,7 +101,6 @@ resource "aws_cloudwatch_metric_alarm" "status_check" {
     InstanceId = var.instance_id
   }
 
-  # Auto-recover (moves the instance to healthy hardware).
   alarm_actions = [
     "arn:aws:automate:${data.aws_region.current.name}:ec2:recover",
     aws_sns_topic.alarms.arn,
@@ -102,7 +109,33 @@ resource "aws_cloudwatch_metric_alarm" "status_check" {
   tags = var.tags
 }
 
-data "aws_region" "current" {}
+# ─── ASG unhealthy alarm (preferred mode) ────────────────────────────────
+# Pages the operator if the ASG ever runs with < 1 InService instance for
+# 3 minutes — i.e. recovery itself is failing (e.g. no Spot capacity in
+# any pool).
+resource "aws_cloudwatch_metric_alarm" "asg_unhealthy" {
+  count = local.use_asg ? 1 : 0
+
+  alarm_name          = "${var.name}-asg-unhealthy"
+  alarm_description   = "ASG has unhealthy or insufficient instances"
+  namespace           = "AWS/AutoScaling"
+  metric_name         = "GroupInServiceInstances"
+  statistic           = "Minimum"
+  period              = 60
+  evaluation_periods  = 3
+  threshold           = 1
+  comparison_operator = "LessThanThreshold"
+  treat_missing_data  = "breaching"
+
+  dimensions = {
+    AutoScalingGroupName = var.asg_name
+  }
+
+  alarm_actions = [aws_sns_topic.alarms.arn]
+  ok_actions    = [aws_sns_topic.alarms.arn]
+
+  tags = var.tags
+}
 
 # ─── Memory + disk alarms (custom metrics from CloudWatch Agent) ──────────
 resource "aws_cloudwatch_metric_alarm" "memory_high" {
@@ -118,14 +151,11 @@ resource "aws_cloudwatch_metric_alarm" "memory_high" {
   comparison_operator = "GreaterThanThreshold"
   treat_missing_data  = "notBreaching"
 
-  dimensions = {
-    InstanceId = var.instance_id
-  }
+  dimensions = local.ec2_dimensions
 
   alarm_actions = [aws_sns_topic.alarms.arn]
   ok_actions    = [aws_sns_topic.alarms.arn]
-
-  tags = var.tags
+  tags          = var.tags
 }
 
 resource "aws_cloudwatch_metric_alarm" "disk_high" {
@@ -141,12 +171,9 @@ resource "aws_cloudwatch_metric_alarm" "disk_high" {
   comparison_operator = "GreaterThanThreshold"
   treat_missing_data  = "notBreaching"
 
-  dimensions = {
-    InstanceId = var.instance_id
-  }
+  dimensions = local.ec2_dimensions
 
   alarm_actions = [aws_sns_topic.alarms.arn]
   ok_actions    = [aws_sns_topic.alarms.arn]
-
-  tags = var.tags
+  tags          = var.tags
 }

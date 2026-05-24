@@ -19,8 +19,13 @@ output "public_subnet_ids" {
 }
 
 output "app_public_ip" {
-  description = "Elastic IP of the k3s node (null when enable_ec2_k3s = false)."
+  description = "Elastic IP of the k3s node — stable across Spot reclaims (ADR-009)."
   value       = var.enable_ec2_k3s ? module.k3s[0].public_ip : null
+}
+
+output "asg_name" {
+  description = "Name of the Auto Scaling Group that owns the k3s node. A Spot reclaim replaces the instance here automatically."
+  value       = var.enable_ec2_k3s ? module.k3s[0].asg_name : null
 }
 
 output "app_url" {
@@ -29,12 +34,12 @@ output "app_url" {
 }
 
 output "app_url_https" {
-  description = "Public app URL over HTTPS on the prod overlay. With enable_letsencrypt = true and ADR-008 wired, this resolves to a real green-padlock Let's Encrypt cert; otherwise traefik serves its self-signed cert (browser warning)."
+  description = "Public app URL over HTTPS on the prod overlay."
   value       = var.enable_ec2_k3s ? module.k3s[0].app_url_https : null
 }
 
 output "letsencrypt_host" {
-  description = "nip.io FQDN used as the Let's Encrypt SAN (host for the prod Ingress + ACME HTTP-01 challenge target)."
+  description = "nip.io FQDN used as the Let's Encrypt SAN."
   value       = var.enable_ec2_k3s ? module.k3s[0].letsencrypt_host : null
 }
 
@@ -44,7 +49,7 @@ output "health_url" {
 }
 
 output "ssm_session_command" {
-  description = "Open a shell on the k3s node via SSM Session Manager (no SSH needed)."
+  description = "Open a shell on the k3s node via SSM Session Manager."
   value       = var.enable_ec2_k3s ? module.k3s[0].ssm_session_command : null
 }
 
