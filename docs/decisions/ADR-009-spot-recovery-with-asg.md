@@ -48,7 +48,7 @@ ASG wins because:
 
 - AWS handles replacement end-to-end. No custom Lambdas or polling code.
 - `mixed_instances_policy` lets us list 5 instance pools
-  (`t3.micro / t3a.micro / t2.micro / t3.small / t3a.small`). The
+  (`t3.medium`). The
   probability of a Spot drought across all five **in the same AZ** is
   much lower than for a single pool — and we still have the on-demand
   fallback toggle below.
